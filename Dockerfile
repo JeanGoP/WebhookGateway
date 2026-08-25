@@ -26,7 +26,13 @@ RUN dotnet publish src/WebhookGateway.Api/WebhookGateway.Api.csproj \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-ENV ASPNETCORE_ENVIRONMENT=Production
+# reloadConfigOnChange=false: por defecto ASP.NET Core vigila appsettings.json con un
+# watcher de archivos (inotify). En contenedores con el límite de inotify bajo —como los
+# de Render— ese watcher no arranca y la app se cae en CreateBuilder. En producción la
+# config viene de variables de entorno, no de editar el JSON en caliente, así que la
+# vigilancia no aporta nada y se desactiva aquí.
+ENV ASPNETCORE_ENVIRONMENT=Production \
+    DOTNET_hostBuilder__reloadConfigOnChange=false
 
 COPY --from=build /app ./
 
