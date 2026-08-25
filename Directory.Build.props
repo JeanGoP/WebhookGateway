@@ -49,6 +49,10 @@
     son la misma optimización prematura a 0,23 msg/s: generar delegados o envolver cada
     log en `if (logger.IsEnabled(...))` para ahorrarse formatear un string que en la
     práctica se formatea unas 14 veces por minuto no compra nada.
+    CA1711 (sufijos reservados: no terminar un tipo en Queue, Collection, etc.) tampoco
+    aplica: IDeliveryQueue ES una cola y la clase marcadora de xunit ES una colección; el
+    sufijo describe justo lo que el tipo es. En Release este aviso se convierte en error y
+    rompería el build de producción por un nombre correcto.
   -->
   <!--
     El archivo de documentación está activado solo para habilitar IDE0005, no porque
@@ -62,7 +66,7 @@
     CS1574 (una referencia cruzada que no resuelve). Esos son errores de verdad.
   -->
   <PropertyGroup>
-    <NoWarn>$(NoWarn);CA2007;CA1848;CA1873;CS1591;CS1573</NoWarn>
+    <NoWarn>$(NoWarn);CA2007;CA1848;CA1873;CA1711;CS1591;CS1573</NoWarn>
   </PropertyGroup>
 
 </Project>
