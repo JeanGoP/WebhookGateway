@@ -1,0 +1,68 @@
+<Project>
+
+  <!--
+    Compilación estricta. El compilador es el revisor más barato que tenemos:
+    si esto pasa, el estilo y la corrección básica ya están verificados sin
+    que nadie tenga que leer el código.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!--
+      InvariantGlobalization en false, a propósito: Microsoft.Data.SqlClient (5.x+) necesita
+      ICU para abrir la conexión —lo usa para negociar el collation del servidor— y lanza
+      "Globalization Invariant Mode is not supported" al conectar si está en true. No tocamos
+      culturas en ningún otro punto del código, así que esto no cambia comportamiento salvo
+      permitir que SqlClient haga lo suyo. La imagen Docker de producción debe basarse en el
+      runtime "aspnet" normal (trae ICU); las variantes -alpine/-chiseled no sirven sin
+      instalar icu-libs aparte.
+    -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <!--
+      Necesario para que IDE0005 (usings sin usar) funcione en compilación, no solo
+      en el editor. Ver https://github.com/dotnet/roslyn/issues/41640
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Determinista y reproducible en CI. -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <!--
+    CA2007 (ConfigureAwait) no aplica: no hay SynchronizationContext en
+    ASP.NET Core y añadirlo en cada await es ruido puro.
+    CA1848 y CA1873 (LoggerMessage delegates / evitar argumentos "costosos" en logging)
+    son la misma optimización prematura a 0,23 msg/s: generar delegados o envolver cada
+    log en `if (logger.IsEnabled(...))` para ahorrarse formatear un string que en la
+    práctica se formatea unas 14 veces por minuto no compra nada.
+  -->
+  <!--
+    El archivo de documentación está activado solo para habilitar IDE0005, no porque
+    queramos exigir documentación exhaustiva. Se documenta lo que necesita explicación
+    y se calla lo obvio, así que estas dos no aplican:
+
+      CS1591  falta comentario XML en un miembro público
+      CS1573  documentaste unos parámetros y otros no
+
+    Lo que SÍ sigue siendo error: CS1572 (documentas un parámetro que no existe) y
+    CS1574 (una referencia cruzada que no resuelve). Esos son errores de verdad.
+  -->
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);CA2007;CA1848;CA1873;CS1591;CS1573</NoWarn>
+  </PropertyGroup>
+
+</Project>

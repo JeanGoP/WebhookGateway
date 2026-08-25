@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <!-- Secretos de desarrollo local (cadena de conexión, claves) fuera del repo.
+         Se cargan solo en el entorno Development. En producción llegan por variables
+         de entorno. Ver el bloque "//Secretos" de appsettings.json. -->
+    <UserSecretsId>webhookgateway-api</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WebhookGateway.Core\WebhookGateway.Core.csproj" />
+    <ProjectReference Include="..\WebhookGateway.Data\WebhookGateway.Data.csproj" />
+    <ProjectReference Include="..\WebhookGateway.Dispatcher\WebhookGateway.Dispatcher.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WebhookGateway.IntegrationTests" />
+  </ItemGroup>
+
+</Project>

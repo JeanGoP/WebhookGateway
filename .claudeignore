@@ -1,0 +1,37 @@
+# Salidas de compilación
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+TestResults/
+*.user
+*.suo
+
+# Dependencias
+node_modules/
+packages/
+.nuget/
+
+# Generado — enorme y nadie lo lee
+**/Migrations/*.Designer.cs
+**/Migrations/*ModelSnapshot.cs
+frontend/src/api/generated.ts
+*.g.cs
+*.generated.ts
+
+# Build del frontend
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
+# Lockfiles
+package-lock.json
+*.lock.json
+
+# Local
+.env
+.env.local
+*.log
+.vs/
+.idea/

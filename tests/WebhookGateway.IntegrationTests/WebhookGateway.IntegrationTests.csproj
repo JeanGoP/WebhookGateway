@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WebhookGateway.Api\WebhookGateway.Api.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Shouldly" />
+    <!-- SQL Server real en contenedor: el claim y la deduplicación no se pueden simular. -->
+    <PackageReference Include="Testcontainers.MsSql" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <!-- El camino caliente va con Dapper; los tests siembran y verifican con él. -->
+    <PackageReference Include="Dapper" />
+    <PackageReference Include="Microsoft.Data.SqlClient" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+  <!--
+    El esquema es la fuente de verdad: los tests aplican los scripts reales de db/, no una
+    copia, para que no haya deriva entre lo que se prueba y lo que se despliega. Se copian
+    al output y la fixture los lee desde AppContext.BaseDirectory/db.
+  -->
+  <ItemGroup>
+    <None Include="..\..\db\01-schema.sql" Link="db\01-schema.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\db\02-traffic-tables.sql" Link="db\02-traffic-tables.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

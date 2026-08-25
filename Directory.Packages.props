@@ -1,0 +1,98 @@
+<Project>
+
+  <!--
+    Gestión centralizada de versiones: los .csproj declaran PackageReference
+    sin Version. Una sola versión de cada paquete en toda la solución.
+
+    NOTA: verificar las versiones con `dotnet restore` en la primera
+    ejecución y fijar las que resuelva el SDK instalado.
+  -->
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <ItemGroup Label="Datos">
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.0" />
+    <!-- Mínimo que exige EF Core 10; fijar menos provoca NU1109. -->
+    <PackageVersion Include="Microsoft.Data.SqlClient" Version="6.1.1" />
+    <PackageVersion Include="Dapper" Version="2.1.66" />
+  </ItemGroup>
+
+  <ItemGroup Label="Extensiones del framework">
+    <PackageVersion Include="Microsoft.Extensions.Options" Version="10.0.0" />
+    <!-- Trae OptionsBuilder.Bind(IConfiguration); sin esto no hay enlace a appsettings. -->
+    <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <!-- Token bucket del control de ritmo por destino. Del framework, no de terceros. -->
+    <PackageVersion Include="System.Threading.RateLimiting" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Api">
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
+    <PackageVersion Include="FluentValidation.AspNetCore" Version="11.3.1" />
+  </ItemGroup>
+
+  <ItemGroup Label="Seguridad">
+    <!-- Argon2id para las contraseñas del panel. -->
+    <PackageVersion Include="Konscious.Security.Cryptography.Argon2" Version="1.3.1" />
+  </ItemGroup>
+
+  <ItemGroup Label="Observabilidad">
+    <PackageVersion Include="Serilog.AspNetCore" Version="9.0.0" />
+    <PackageVersion Include="Serilog.Sinks.Console" Version="6.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Tests">
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.1" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageVersion Include="Testcontainers.MsSql" Version="4.1.0" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.0" />
+    <PackageVersion Include="Shouldly" Version="4.3.0" />
+    <PackageVersion Include="NSubstitute" Version="5.3.0" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+  </ItemGroup>
+
+  <!--
+    Fijados por seguridad
+    =====================
+    Estos no se referencian directamente: llegan como dependencias transitivas y
+    arrastran vulnerabilidades conocidas. Con CentralPackageTransitivePinningEnabled
+    se pueden elevar desde aquí sin añadirlos a ningún .csproj.
+
+    NO los quites sin comprobar antes que el paquete que los arrastra ya trae una
+    versión igual o superior: si vuelven atrás, la compilación falla con NU1903, que
+    es exactamente lo que queremos que pase.
+  -->
+  <ItemGroup Label="Elevaciones de seguridad (transitivas)">
+    <!--
+      Viene de Microsoft.AspNetCore.OpenApi. CVE-2026-49451: referencias circulares
+      de esquema desbordan la pila al parsear. Corregido en 2.7.5.
+    -->
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.7.5" />
+
+    <!--
+      Viene de Testcontainers. CVE-2026-48798: ScpClient permite escritura arbitraria
+      de archivos con nombres controlados por el servidor. Corregido en 2026.0.0.
+    -->
+    <PackageVersion Include="SSH.NET" Version="2026.0.0" />
+  </ItemGroup>
+
+  <!--
+    Deliberadamente ausentes:
+      MediatR, AutoMapper, un patrón Repository  → ver CLAUDE.md
+      Polly                                      → el breaker necesita estado
+                                                    persistido, así que va a mano
+      Un limitador de tasa de terceros           → System.Threading.RateLimiting
+                                                    viene en el framework
+  -->
+
+</Project>

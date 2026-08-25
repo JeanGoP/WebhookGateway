@@ -1,0 +1,21 @@
+# Mantiene el contexto de build pequeño: solo src/ y los props llegan al daemon.
+
+**/bin/
+**/obj/
+**/.vs/
+**/*.user
+
+# El panel se despliega aparte como sitio estático; su node_modules es enorme.
+frontend/
+
+# Los tests (y sus contenedores) no van en la imagen de producción.
+tests/
+
+# Documentación, scripts de base de datos, control de versiones y config de despliegue.
+docs/
+db/
+.git/
+.github/
+*.md
+docker-compose.yml
+render.yaml

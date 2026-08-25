@@ -1,0 +1,1011 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arquitectura WebhookGateway</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:      #FCFCFD;
+    --surface:     #F4F5F8;
+    --surface-2:   #EAECF2;
+    --line:        #D7DAE3;
+    --line-soft:   #E6E8EF;
+    --ink:         #16181F;
+    --ink-2:       #4A4F5C;
+    --ink-3:       #767C8B;
+    --accent:      #3A45C4;
+    --accent-2:    #5B65D8;
+    --accent-soft: #E7E8FA;
+    --ok:          #1F7A4D;
+    --ok-soft:     #DFF1E7;
+    --warn:        #96610F;
+    --warn-soft:   #FAEEDA;
+    --bad:         #AB2A36;
+    --bad-soft:    #FAE4E6;
+    --idle:        #6E7482;
+    --idle-soft:   #E9EBF0;
+
+    --f-display: "Zilla Slab", "Bitter", Georgia, serif;
+    --f-body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0E0F14;
+      --surface:     #171922;
+      --surface-2:   #1E2130;
+      --line:        #2E3243;
+      --line-soft:   #232636;
+      --ink:         #E7E9F0;
+      --ink-2:       #A6ACBD;
+      --ink-3:       #767C8B;
+      --accent:      #8B93FF;
+      --accent-2:    #A5ABFF;
+      --accent-soft: #1D2040;
+      --ok:          #45B583;
+      --ok-soft:     #12291F;
+      --warn:        #D6A441;
+      --warn-soft:   #2A2113;
+      --bad:         #E4737F;
+      --bad-soft:    #2C161A;
+      --idle:        #8A90A0;
+      --idle-soft:   #1E2130;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0E0F14;
+    --surface:     #171922;
+    --surface-2:   #1E2130;
+    --line:        #2E3243;
+    --line-soft:   #232636;
+    --ink:         #E7E9F0;
+    --ink-2:       #A6ACBD;
+    --ink-3:       #767C8B;
+    --accent:      #8B93FF;
+    --accent-2:    #A5ABFF;
+    --accent-soft: #1D2040;
+    --ok:          #45B583;
+    --ok-soft:     #12291F;
+    --warn:        #D6A441;
+    --warn-soft:   #2A2113;
+    --bad:         #E4737F;
+    --bad-soft:    #2C161A;
+    --idle:        #8A90A0;
+    --idle-soft:   #1E2130;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    margin: 0;
+  }
+
+  .doc {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 4.5rem 1.5rem 8rem;
+  }
+
+  .bleed {
+    width: min(62rem, calc(100vw - 3rem));
+    margin-left: 50%;
+    transform: translateX(-50%);
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead { border-bottom: 2px solid var(--ink); padding-bottom: 1.75rem; margin-bottom: 2.5rem; }
+
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.9rem;
+  }
+
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(2.1rem, 6vw, 3.1rem);
+    line-height: 1.06;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0 0 0.85rem;
+  }
+
+  .standfirst {
+    font-size: 1.12rem;
+    color: var(--ink-2);
+    max-width: 34rem;
+    margin: 0;
+    text-wrap: pretty;
+  }
+
+  /* ---------- headings ---------- */
+
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1.72rem;
+    line-height: 1.2;
+    letter-spacing: -0.012em;
+    text-wrap: balance;
+    margin: 4rem 0 0.4rem;
+    padding-top: 1.4rem;
+    border-top: 1px solid var(--line);
+  }
+
+  h3 {
+    font-family: var(--f-body);
+    font-weight: 600;
+    font-size: 1.06rem;
+    line-height: 1.35;
+    letter-spacing: 0.002em;
+    margin: 2.4rem 0 0.5rem;
+  }
+
+  h2 + p, h3 + p, h2 + .lede { margin-top: 0.55rem; }
+
+  .lede { color: var(--ink-2); font-size: 1.03rem; }
+
+  p { margin: 0 0 1.1rem; text-wrap: pretty; }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  strong { font-weight: 600; color: var(--ink); }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.86em;
+    background: var(--surface-2);
+    border-radius: 3px;
+    padding: 0.1em 0.35em;
+  }
+
+  ul, ol { margin: 0 0 1.2rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.5rem; }
+  li::marker { color: var(--ink-3); }
+
+  /* ---------- stat strip ---------- */
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 2rem 0 2.4rem;
+  }
+
+  .stat { background: var(--ground); padding: 1rem 1.1rem 1.05rem; }
+
+  .stat dt {
+    font-family: var(--f-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-bottom: 0.4rem;
+  }
+
+  .stat dd {
+    margin: 0;
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1.42rem;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stat dd span { font-family: var(--f-body); font-size: 0.78rem; font-weight: 400; color: var(--ink-3); letter-spacing: 0; }
+
+  /* ---------- tables ---------- */
+
+  .table-wrap { overflow-x: auto; margin: 1.6rem 0 2rem; border: 1px solid var(--line); border-radius: 4px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+
+  th {
+    font-family: var(--f-mono);
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    text-align: left;
+    padding: 0.75rem 0.95rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 0.72rem 0.95rem;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; font-family: var(--f-mono); font-size: 0.85rem; }
+  td.key { font-weight: 500; white-space: nowrap; }
+
+  /* ---------- code ---------- */
+
+  pre {
+    font-family: var(--f-mono);
+    font-size: 0.8rem;
+    line-height: 1.62;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1.05rem 1.15rem;
+    overflow-x: auto;
+    margin: 1.5rem 0 1.9rem;
+    tab-size: 2;
+  }
+
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .c-key { color: var(--accent); font-weight: 500; }
+  .c-com { color: var(--ink-3); font-style: italic; }
+  .c-str { color: var(--ok); }
+
+  /* ---------- callout ---------- */
+
+  .note {
+    border-left: 2px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 1rem 1.2rem;
+    border-radius: 0 4px 4px 0;
+    margin: 1.8rem 0;
+    font-size: 0.95rem;
+  }
+
+  .note p:last-child { margin-bottom: 0; }
+
+  .note-label {
+    font-family: var(--f-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 0.4rem;
+    font-weight: 600;
+  }
+
+  /* ---------- pills ---------- */
+
+  .pill {
+    display: inline-block;
+    font-family: var(--f-mono);
+    font-size: 0.7rem;
+    font-weight: 500;
+    padding: 0.1rem 0.45rem;
+    border-radius: 3px;
+    white-space: nowrap;
+    line-height: 1.5;
+  }
+
+  .p-ok   { background: var(--ok-soft);   color: var(--ok); }
+  .p-warn { background: var(--warn-soft); color: var(--warn); }
+  .p-bad  { background: var(--bad-soft);  color: var(--bad); }
+  .p-idle { background: var(--idle-soft); color: var(--idle); }
+
+  /* ---------- phases ---------- */
+
+  .phases { list-style: none; padding: 0; margin: 2rem 0 0; counter-reset: ph -1; }
+
+  .phase {
+    counter-increment: ph;
+    display: grid;
+    grid-template-columns: 3.2rem 1fr;
+    gap: 0 1.1rem;
+    padding: 1.35rem 0;
+    border-top: 1px solid var(--line-soft);
+    margin: 0;
+  }
+
+  .phase:first-child { border-top: 1px solid var(--line); }
+
+  .phase::before {
+    content: "F" counter(ph);
+    font-family: var(--f-mono);
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--accent);
+    padding-top: 0.14rem;
+  }
+
+  .phase h3 { margin: 0 0 0.3rem; font-size: 1rem; }
+  .phase p { margin: 0 0 0.55rem; font-size: 0.94rem; color: var(--ink-2); }
+  .phase ul { margin: 0; font-size: 0.9rem; color: var(--ink-2); }
+  .phase li { margin-bottom: 0.28rem; }
+
+  /* ---------- diagram ---------- */
+
+  figure { margin: 2rem 0 2.2rem; }
+
+  .diagram {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--surface);
+    padding: 1.4rem 1rem;
+    overflow-x: auto;
+  }
+
+  .diagram svg { display: block; width: 100%; min-width: 480px; height: auto; }
+
+  figcaption {
+    font-size: 0.83rem;
+    color: var(--ink-3);
+    margin-top: 0.7rem;
+    line-height: 1.5;
+  }
+
+  /* ---------- tree ---------- */
+
+  .tree {
+    font-family: var(--f-mono);
+    font-size: 0.78rem;
+    line-height: 1.72;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1.05rem 1.15rem;
+    overflow-x: auto;
+    margin: 1.5rem 0 1.9rem;
+    white-space: pre;
+  }
+
+  .tree .dim { color: var(--ink-3); }
+  .tree .hi { color: var(--accent); font-weight: 500; }
+
+  /* ---------- toc ---------- */
+
+  .toc { display: none; }
+
+  @media (min-width: 1220px) {
+    .toc {
+      display: block;
+      position: fixed;
+      top: 4.8rem;
+      left: 2rem;
+      width: 12.5rem;
+      font-size: 0.78rem;
+      line-height: 1.45;
+      border-left: 1px solid var(--line);
+      padding-left: 0.9rem;
+    }
+    .toc ol { list-style: none; margin: 0; padding: 0; }
+    .toc li { margin-bottom: 0.52rem; }
+    .toc a { color: var(--ink-3); text-decoration: none; display: block; }
+    .toc a:hover { color: var(--accent); }
+  }
+
+  .closing {
+    margin-top: 4rem;
+    padding-top: 1.4rem;
+    border-top: 2px solid var(--ink);
+    font-size: 0.86rem;
+    color: var(--ink-3);
+    font-family: var(--f-mono);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="toc" aria-label="Contenido">
+  <ol>
+    <li><a href="#dimension">Dimensionamiento</a></li>
+    <li><a href="#decisiones">Decisiones</a></li>
+    <li><a href="#fanout">El modelo de fanout</a></li>
+    <li><a href="#datos">Modelo de datos</a></li>
+    <li><a href="#sql">SQL Server</a></li>
+    <li><a href="#recepcion">Recepción</a></li>
+    <li><a href="#despacho">Despacho</a></li>
+    <li><a href="#seguridad">Seguridad</a></li>
+    <li><a href="#proyectos">Estructura</a></li>
+    <li><a href="#render">Despliegue</a></li>
+    <li><a href="#fases">Fases</a></li>
+    <li><a href="#riesgos">Riesgos abiertos</a></li>
+  </ol>
+</nav>
+
+<main class="doc">
+
+  <header class="masthead">
+    <p class="eyebrow">Plan de arquitectura · v1</p>
+    <h1>WebhookGateway</h1>
+    <p class="standfirst">Un gateway de webhooks configurable: recibe de múltiples sistemas, garantiza que nada se pierde, y entrega a cada destino al ritmo que ese destino aguanta.</p>
+  </header>
+
+  <p>El propósito del sistema no es el throughput. A 14 peticiones por minuto de promedio, ningún componente está bajo presión. <strong>El valor está en el suavizado y la garantía de entrega:</strong> absorber un pico de 2.000/min y drenarlo hacia un sistema que solo tolera 60/min, sin perder un solo evento y sin tumbar al destino.</p>
+
+  <p>Todo lo que sigue está dimensionado para esa realidad. Donde una decisión parecía necesaria por volumen y no lo era, se retiró.</p>
+
+  <h2 id="dimension">Dimensionamiento</h2>
+
+  <dl class="stats">
+    <div class="stat"><dt>Promedio</dt><dd>14<span> /min</span></dd></div>
+    <div class="stat"><dt>Pico</dt><dd>2.000<span> /min</span></dd></div>
+    <div class="stat"><dt>Volumen diario</dt><dd>20.000</dd></div>
+    <div class="stat"><dt>Filas / año</dt><dd>7,3<span> M</span></dd></div>
+    <div class="stat"><dt>Almacenamiento</dt><dd>~4<span> GB</span></dd></div>
+  </dl>
+
+  <p>El promedio real es <strong>una petición cada cuatro segundos</strong>. El pico declarado de 2.000/min alcanzaría el total de un día entero en diez minutos, lo que confirma que es una carga batch corta, no un régimen sostenido.</p>
+
+  <p>Con payloads de 1–10 KB comprimidos con gzip (~85 % de reducción en JSON), retención de 365 días para metadata y 90 para cuerpos, la base de datos completa ronda los <strong>4 GB</strong>. En un servidor que ya aloja bases grandes, el gateway es un archivo adjunto.</p>
+
+  <h2 id="decisiones">Decisiones de arquitectura</h2>
+
+  <div class="table-wrap bleed">
+    <table>
+      <thead>
+        <tr><th>Decisión</th><th>Elección</th><th>Por qué</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="key">Broker de mensajes</td>
+          <td class="key">Ninguno</td>
+          <td>A 0,23 msg/s, RabbitMQ es ceremonia. Cola en proceso con <code>System.Threading.Channels</code> + SQL como ledger. CloudAMQP gratis bloquea la instancia al cruzar 1M/mes, y con el multiplicador de reintentos y fanout se cruza.</td>
+        </tr>
+        <tr>
+          <td class="key">Fuente de verdad</td>
+          <td class="key">SQL Server 2019 Enterprise</td>
+          <td>INSERT síncrono al recibir es el piso irreducible para no perder nada. Todo lo demás va en batch asíncrono.</td>
+        </tr>
+        <tr>
+          <td class="key">Aislamiento de carga</td>
+          <td class="key">Resource Governor</td>
+          <td>Exclusivo de Enterprise. Encajona CPU e IOPS del gateway en la instancia compartida. Es el argumento ante el DBA.</td>
+        </tr>
+        <tr>
+          <td class="key">Índices de archivo</td>
+          <td class="key">Rowstore + compresión PAGE</td>
+          <td>Columnstore se descartó: se justificaba con 86M filas/mes, no con 7,3M al año. Añade complejidad operativa sin beneficio medible a esta escala.</td>
+        </tr>
+        <tr>
+          <td class="key">Tabla caliente/fría</td>
+          <td class="key">Una sola tabla</td>
+          <td>Un índice filtrado sobre los mensajes en vuelo cuesta lo mismo tenga la tabla 60 mil filas o 7 millones. El split resolvía un problema inexistente.</td>
+        </tr>
+        <tr>
+          <td class="key">Purga</td>
+          <td class="key"><code>SWITCH PARTITION</code></td>
+          <td>Operación de metadatos, instantánea, sin inflar el log de transacciones. Nunca <code>DELETE</code> masivo en un servidor compartido.</td>
+        </tr>
+        <tr>
+          <td class="key">Topología de despliegue</td>
+          <td class="key">Un servicio, worker embebido</td>
+          <td>Render de pago no hace spin-down. El worker corre como <code>IHostedService</code> en el mismo host, con el código aislado en su propio proyecto por si algún día se separa.</td>
+        </tr>
+        <tr>
+          <td class="key">Fanout</td>
+          <td class="key">1 mensaje → N entregas</td>
+          <td>La unidad de trabajo es <em>(mensaje × destino)</em>, no el mensaje. Cada destino reintenta, expira y se limita de forma independiente.</td>
+        </tr>
+        <tr>
+          <td class="key">Transformación</td>
+          <td class="key">Ninguna — passthrough</td>
+          <td>El body sale tal cual entró. Un motor de transformación es un producto entero por sí solo; queda fuera de la v1.</td>
+        </tr>
+        <tr>
+          <td class="key">Modo de fallo</td>
+          <td class="key">503 + <code>Retry-After</code></td>
+          <td>Si SQL no responde, se rechaza explícitamente. Casi todos los emisores reintentan ante 5xx. Mejor rechazar que aceptar y perder.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="fanout">El modelo de fanout</h2>
+
+  <p class="lede">Es la decisión que más condiciona el modelo de datos, y la que hay que entender antes que ninguna otra.</p>
+
+  <p>Como un webhook de entrada puede alimentar a N destinos, <strong>el mensaje recibido y la entrega son entidades distintas</strong>. El mensaje es inmutable y se guarda una vez. La entrega es la unidad de trabajo del despachador: tiene su propio estado, su propio contador de intentos, su propia ventana de expiración y su propio límite de velocidad, heredados de la configuración de su destino.</p>
+
+  <figure>
+    <div class="diagram bleed">
+      <svg viewBox="0 0 880 300" role="img" aria-label="Diagrama: un webhook entrante genera un mensaje que se abre en tres entregas independientes, cada una con su propio estado hacia un destino distinto">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <g font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-3)" letter-spacing="0.08em">
+          <text x="12" y="20">ENTRADA</text>
+          <text x="222" y="20">LEDGER</text>
+          <text x="432" y="20">ENTREGAS</text>
+          <text x="712" y="20">DESTINOS</text>
+        </g>
+
+        <!-- inbound -->
+        <rect x="12" y="118" width="150" height="62" rx="4" fill="var(--ground)" stroke="var(--line)"/>
+        <text x="28" y="144" font-family="IBM Plex Sans, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">POST /in/erp/ventas</text>
+        <text x="28" y="163" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-3)">HMAC · dedupe</text>
+
+        <!-- message -->
+        <rect x="222" y="112" width="150" height="74" rx="4" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="238" y="138" font-family="IBM Plex Sans, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">WebhookMessage</text>
+        <text x="238" y="157" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-2)">body inmutable</text>
+        <text x="238" y="173" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-2)">guardado 1 vez</text>
+
+        <g color="var(--ink-3)" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)" fill="none">
+          <path d="M 168 149 L 214 149"/>
+          <path d="M 378 149 C 402 149, 402 66, 426 66"/>
+          <path d="M 378 149 L 426 149"/>
+          <path d="M 378 149 C 402 149, 402 232, 426 232"/>
+          <path d="M 646 66 L 700 66"/>
+          <path d="M 646 149 L 700 149"/>
+          <path d="M 646 232 L 700 232"/>
+        </g>
+
+        <!-- deliveries -->
+        <g font-family="IBM Plex Sans, sans-serif" font-size="12.5" font-weight="500">
+          <rect x="432" y="42" width="214" height="48" rx="4" fill="var(--ground)" stroke="var(--line)"/>
+          <rect x="432" y="42" width="3" height="48" fill="var(--ok)"/>
+          <text x="448" y="62" fill="var(--ink)">Entrega · CRM</text>
+          <text x="448" y="79" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--ok)">ENTREGADO · 1 intento · 240ms</text>
+
+          <rect x="432" y="125" width="214" height="48" rx="4" fill="var(--ground)" stroke="var(--line)"/>
+          <rect x="432" y="125" width="3" height="48" fill="var(--warn)"/>
+          <text x="448" y="145" fill="var(--ink)">Entrega · Facturación</text>
+          <text x="448" y="162" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--warn)">REINTENTANDO · 3/8 · +30s</text>
+
+          <rect x="432" y="208" width="214" height="48" rx="4" fill="var(--ground)" stroke="var(--line)"/>
+          <rect x="432" y="208" width="3" height="48" fill="var(--bad)"/>
+          <text x="448" y="228" fill="var(--ink)">Entrega · Analítica</text>
+          <text x="448" y="245" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--bad)">CIRCUITO ABIERTO · en pausa</text>
+        </g>
+
+        <!-- destinations -->
+        <g font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink-2)">
+          <rect x="700" y="46" width="168" height="40" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+          <text x="714" y="63">crm.acme.com</text>
+          <text x="714" y="78" fill="var(--ink-3)">600/min</text>
+
+          <rect x="700" y="129" width="168" height="40" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+          <text x="714" y="146">erp.interno/hook</text>
+          <text x="714" y="161" fill="var(--ink-3)">60/min</text>
+
+          <rect x="700" y="212" width="168" height="40" rx="4" fill="var(--surface-2)" stroke="var(--line)"/>
+          <text x="714" y="229">bi.acme.com</text>
+          <text x="714" y="244" fill="var(--ink-3)">120/min</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Un fallo en Analítica no retrasa a CRM ni a Facturación. Cada entrega lleva su propio reloj de reintentos, su propia ventana de expiración y su propio presupuesto de velocidad.</figcaption>
+  </figure>
+
+  <p>El efecto práctico sobre el volumen: con un promedio de dos destinos por mensaje, 20.000 mensajes al día producen <strong>40.000 entregas</strong> y unas 48.000 filas de intento. Sigue siendo pequeño, pero es el número que hay que usar para dimensionar, no el de mensajes.</p>
+
+  <h2 id="datos">Modelo de datos</h2>
+
+  <h3>Configuración</h3>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Tabla</th><th>Contenido</th></tr></thead>
+      <tbody>
+        <tr><td class="key">Integration</td><td>Agrupador lógico. Nombre, slug, activo.</td></tr>
+        <tr><td class="key">InboundEndpoint</td><td>Una URL pública de recepción. Slug, tipo de autenticación y su configuración cifrada, estrategia de deduplicación, tamaño máximo de body.</td></tr>
+        <tr><td class="key">OutboundEndpoint</td><td>Un destino. URL, método, autenticación cifrada, cabeceras propias, timeout, límite de velocidad, concurrencia, política de reintentos, ventana de entrega, umbrales del circuit breaker.</td></tr>
+        <tr><td class="key">Subscription</td><td>El fanout: qué endpoint de entrada alimenta a qué destino. Activa/inactiva de forma independiente.</td></tr>
+        <tr><td class="key">AppUser · Role</td><td>Usuarios propios del panel. Hash Argon2id, refresh tokens.</td></tr>
+        <tr><td class="key">AuditLog</td><td>Quién cambió qué configuración y cuándo. En un gateway esto no es opcional.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Tráfico</h3>
+
+  <p>Las cuatro tablas siguientes están particionadas por mes sobre su columna de fecha, con compresión <code>PAGE</code> y retenciones independientes.</p>
+
+  <pre><code><span class="c-com">-- Lo recibido. Inmutable. Retención 365 días.</span>
+WebhookMessage (
+  Id              bigint identity,
+  InboundEndpointId int,
+  ReceivedAt      datetime2(3),   <span class="c-com">-- columna de partición</span>
+  SourceIp        varchar(45),
+  HeadersJson     nvarchar(max),
+  QueryString     nvarchar(2000),
+  BodySizeBytes   int,
+  BodyHash        binary(32),
+  Status          tinyint         <span class="c-com">-- Received | Duplicate | NoSubscriptions</span>
+)
+
+<span class="c-com">-- El cuerpo, separado para poder purgarlo antes. Retención 90 días.</span>
+WebhookPayload (
+  MessageId       bigint,
+  ReceivedAt      datetime2(3),   <span class="c-com">-- columna de partición</span>
+  Encoding        tinyint,        <span class="c-com">-- 0 raw | 1 gzip</span>
+  Body            varbinary(max) null,
+  StorageRef      nvarchar(500) null,  <span class="c-com">-- indirección para archivos grandes</span>
+  SizeBytes       int
+)
+
+<span class="c-com">-- La unidad de trabajo del despachador. Retención 365 días.</span>
+WebhookDelivery (
+  Id              bigint identity,
+  MessageId       bigint,
+  OutboundEndpointId int,
+  CreatedAt       datetime2(3),   <span class="c-com">-- columna de partición</span>
+  Status          tinyint,        <span class="c-com">-- 0 Pending 1 InFlight 2 Retrying 3 Delivered</span>
+                                  <span class="c-com">-- 4 Failed 5 Expired 6 Cancelled 7 Parked</span>
+  AttemptCount    smallint,
+  NextAttemptAt   datetime2(3),
+  ExpiresAt       datetime2(3),   <span class="c-com">-- CreatedAt + ventana del destino</span>
+  LeaseUntil      datetime2(3) null,
+  WorkerId        varchar(64) null,
+  LastStatusCode  smallint null,
+  LastError       nvarchar(1000) null,
+  CompletedAt     datetime2(3) null
+)
+
+<span class="c-com">-- Un registro por intento HTTP. Retención 90 días.</span>
+DeliveryAttempt (
+  Id              bigint identity,
+  DeliveryId      bigint,
+  StartedAt       datetime2(3),   <span class="c-com">-- columna de partición</span>
+  AttemptNumber   smallint,
+  DurationMs      int,
+  StatusCode      smallint null,
+  ResponseHeadersJson nvarchar(4000) null,
+  ResponseBody    nvarchar(4000) null,  <span class="c-com">-- truncado</span>
+  ErrorMessage    nvarchar(1000) null
+)</code></pre>
+
+  <div class="note">
+    <span class="note-label">Deduplicación</span>
+    <p>La clave de deduplicación <strong>no</strong> va como índice único sobre <code>WebhookMessage</code>: un índice único que cruza particiones impide el <code>SWITCH</code> de purga. Va en su propia tabla pequeña y sin particionar, <code>MessageDedupe (InboundEndpointId, DedupeKey, MessageId, ExpiresAt)</code>, con retención corta —7 días basta, ningún proveedor reintenta más allá—. La tabla grande queda libre para rotar particiones.</p>
+  </div>
+
+  <h3>Índices que importan</h3>
+
+  <pre><code><span class="c-com">-- El índice del despachador. Contiene solo lo que está en vuelo:</span>
+<span class="c-com">-- decenas de filas en régimen normal, sin importar el tamaño de la tabla.</span>
+<span class="c-key">CREATE INDEX</span> IX_Delivery_Dispatch <span class="c-key">ON</span> WebhookDelivery (NextAttemptAt, OutboundEndpointId)
+  <span class="c-key">INCLUDE</span> (MessageId, AttemptCount, ExpiresAt)
+  <span class="c-key">WHERE</span> Status <span class="c-key">IN</span> (0, 2);
+
+<span class="c-com">-- Recuperación de leases huérfanos tras una caída del worker.</span>
+<span class="c-key">CREATE INDEX</span> IX_Delivery_Lease <span class="c-key">ON</span> WebhookDelivery (LeaseUntil)
+  <span class="c-key">WHERE</span> Status = 1;
+
+<span class="c-com">-- Búsqueda en el panel.</span>
+<span class="c-key">CREATE INDEX</span> IX_Message_Search <span class="c-key">ON</span> WebhookMessage (InboundEndpointId, ReceivedAt <span class="c-key">DESC</span>);</code></pre>
+
+  <h2 id="sql">SQL Server</h2>
+
+  <h3>Resource Governor</h3>
+
+  <p>El gateway usa su propio login. Se clasifica en un workload group con techo de CPU e IOPS, de modo que ni en el peor pico pueda robarle recursos a las bases grandes de la instancia.</p>
+
+  <pre><code><span class="c-key">CREATE</span> RESOURCE POOL GatewayPool
+  <span class="c-key">WITH</span> (MAX_CPU_PERCENT = 15, MAX_MEMORY_PERCENT = 10, MAX_IOPS_PER_VOLUME = 500);
+
+<span class="c-key">CREATE</span> WORKLOAD GROUP GatewayGroup <span class="c-key">USING</span> GatewayPool;
+
+<span class="c-com">-- La función clasificadora enruta por login.</span></code></pre>
+
+  <h3>Particionado y purga</h3>
+
+  <p>Función y esquema de partición mensuales sobre las columnas de fecha. Un job nocturno hace <code>SWITCH PARTITION</code> de la partición más antigua a una tabla de staging idéntica y luego <code>TRUNCATE</code>. Es instantáneo y no genera log. Un segundo job crea la partición del mes siguiente por adelantado.</p>
+
+  <p>Las retenciones son configurables por integración: <code>RetentionDays</code> para metadata (defecto 365) y <code>PayloadRetentionDays</code> para cuerpos (defecto 90).</p>
+
+  <h2 id="recepcion">Recepción</h2>
+
+  <p>Ruta única y dinámica: <code>POST /in/{integracion}/{endpoint}</code>. La secuencia es estricta, y el orden importa.</p>
+
+  <ol>
+    <li><strong>Leer el body como <code>byte[]</code>, nunca deserializar antes.</strong> Las firmas HMAC se calculan sobre los bytes exactos; deserializar y reserializar rompe la validación.</li>
+    <li>Aplicar el límite de tamaño configurado. Rechazar con <code>413</code> si se excede.</li>
+    <li>Validar la autenticación según la estrategia del endpoint. Rechazar con <code>401</code>.</li>
+    <li>Calcular la clave de deduplicación. Si ya existe, responder <code>200</code> con el id original — es un duplicado legítimo, no un error.</li>
+    <li>Persistir mensaje y payload, y crear <strong>una fila de entrega por cada suscripción activa</strong>, en una sola transacción.</li>
+    <li>Responder <code>202</code> con el id del mensaje.</li>
+    <li>Encolar los ids de entrega en el canal en memoria para despacho inmediato.</li>
+  </ol>
+
+  <p>El objetivo es responder en menos de 200 ms. Nada de trabajo real antes del <code>202</code>.</p>
+
+  <div class="note">
+    <span class="note-label">Absorción de picos</span>
+    <p>Para las ráfagas: acumular una ventana de 5–10 ms de webhooks entrantes, hacer <em>un</em> insert masivo con un table-valued parameter, y solo entonces liberar todas las respuestas HTTP pendientes. Convierte 500 inserts en uno a cambio de 10 ms de latencia que a ningún emisor le importan. Son unas 60 líneas y multiplica por veinte la capacidad de absorción.</p>
+  </div>
+
+  <h2 id="despacho">Despacho</h2>
+
+  <h3>Claim con lease y reparto justo</h3>
+
+  <p>Render hace despliegues sin downtime, lo que significa que durante unos segundos hay <strong>dos instancias vivas con dos workers</strong>. Sin claim atómico, cada despliegue produce entregas duplicadas. Por eso esto va desde el día uno, no «cuando escalemos».</p>
+
+  <p>Y con 50 destinos, un backlog de 20.000 entregas para uno solo no puede dejar sin servicio a los otros 49. El claim reparte en vez de ir en orden estricto de llegada:</p>
+
+  <pre><code><span class="c-key">WITH</span> ranked <span class="c-key">AS</span> (
+  <span class="c-key">SELECT</span> Id, MessageId, OutboundEndpointId, AttemptCount,
+         <span class="c-key">ROW_NUMBER</span>() <span class="c-key">OVER</span> (<span class="c-key">PARTITION BY</span> OutboundEndpointId
+                             <span class="c-key">ORDER BY</span> NextAttemptAt) <span class="c-key">AS</span> rn
+  <span class="c-key">FROM</span> WebhookDelivery <span class="c-key">WITH</span> (READPAST, UPDLOCK, ROWLOCK)
+  <span class="c-key">WHERE</span> Status <span class="c-key">IN</span> (0, 2)
+    <span class="c-key">AND</span> NextAttemptAt &lt;= <span class="c-key">SYSUTCDATETIME</span>()
+    <span class="c-key">AND</span> OutboundEndpointId <span class="c-key">NOT IN</span> (<span class="c-key">SELECT</span> value <span class="c-key">FROM</span> <span class="c-key">STRING_SPLIT</span>(@circuitoAbierto, <span class="c-str">','</span>))
+)
+<span class="c-key">UPDATE TOP</span> (100) ranked
+<span class="c-key">SET</span> Status = 1,
+    LeaseUntil = <span class="c-key">DATEADD</span>(second, 60, <span class="c-key">SYSUTCDATETIME</span>()),
+    WorkerId = @workerId
+<span class="c-key">OUTPUT</span> inserted.Id, inserted.MessageId, inserted.OutboundEndpointId, inserted.AttemptCount
+<span class="c-key">WHERE</span> rn &lt;= 5;   <span class="c-com">-- máximo 5 por destino y ciclo</span></code></pre>
+
+  <p>El worker renueva el lease con un heartbeat mientras trabaja. Si el proceso muere, el lease expira y un barredor devuelve esas entregas a <span class="pill p-warn">Retrying</span>. El mismo mecanismo da idempotencia entre instancias y recuperación ante caídas.</p>
+
+  <h3>Control de velocidad</h3>
+
+  <p>Un <code>HttpClient</code> con nombre por destino. <code>MaxConnectionsPerServer</code> en el <code>SocketsHttpHandler</code> impone el límite de concurrencia sin escribir código. Sobre eso, un token bucket por destino aplica el límite de peticiones por minuto configurado.</p>
+
+  <p>Este es el corazón del producto: el pico entra a 2.000/min y sale a 60/min hacia el sistema que solo aguanta eso.</p>
+
+  <h3>Reintentos y expiración</h3>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Respuesta</th><th>Acción</th></tr></thead>
+      <tbody>
+        <tr><td class="key">2xx</td><td><span class="pill p-ok">Delivered</span> — se cierra la entrega.</td></tr>
+        <tr><td class="key">408 · 429</td><td>Reintentar. Respetar <code>Retry-After</code> si viene.</td></tr>
+        <tr><td class="key">otros 4xx</td><td><span class="pill p-bad">Failed</span> sin reintento. El destino rechazó el contenido; insistir no cambia nada.</td></tr>
+        <tr><td class="key">5xx · timeout · red</td><td><span class="pill p-warn">Retrying</span> con backoff exponencial y jitter.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Escalera de backoff configurable por destino, con jitter aleatorio para evitar que un pico de fallos genere un pico de reintentos sincronizados: 5 s → 30 s → 2 min → 10 min → 1 h → 6 h.</p>
+
+  <p>Cada entrega lleva un <code>ExpiresAt</code> calculado al crearse desde la ventana del destino (defecto 72 h). Al vencer, la entrega pasa a <span class="pill p-idle">Expired</span>, se deja de reintentar y se genera una alerta. Sin esto, un destino muerto acumula reintentos zombi para siempre.</p>
+
+  <h3>Circuit breaker</h3>
+
+  <p>Tras N fallos consecutivos hacia un destino, su circuito se abre: se deja de despachar hacia él durante un periodo configurable y sus entregas quedan <span class="pill p-idle">Parked</span> en SQL. Un intento aislado en «semi-abierto» comprueba si volvió. El estado vive en memoria y se persiste para sobrevivir a los despliegues.</p>
+
+  <h3>Apagado ordenado</h3>
+
+  <p>Al recibir la señal de parada, el worker deja de reclamar entregas nuevas, termina las que tiene en vuelo, vuelca el batch pendiente de intentos y libera sus leases explícitamente. Lo que no alcance a terminar lo recoge el barredor de leases en la instancia nueva.</p>
+
+  <h2 id="seguridad">Seguridad</h2>
+
+  <p>Patrón de estrategia en ambas direcciones: <code>IInboundAuthValidator</code> e <code>IOutboundAuthProvider</code>, resueltos por tipo desde la configuración del endpoint.</p>
+
+  <h3>Estrategias de salida</h3>
+
+  <div class="table-wrap bleed">
+    <table>
+      <thead><tr><th>Estrategia</th><th>Lo que proporciona quien configura</th><th>Fase</th></tr></thead>
+      <tbody>
+        <tr><td class="key">Ninguna</td><td>—</td><td class="num">F2</td></tr>
+        <tr><td class="key">API key</td><td>Nombre de la cabecera <em>y</em> valor, o nombre del parámetro de query. El nombre nunca se codifica en duro: en la práctica aparece como <code>X-API-Key</code>, <code>Api-Key</code>, <code>Authorization: ApiKey …</code> o <code>?api_key=</code>.</td><td class="num">F2</td></tr>
+        <tr><td class="key">Bearer estático</td><td>El token.</td><td class="num">F2</td></tr>
+        <tr><td class="key">Basic</td><td>Usuario y contraseña.</td><td class="num">F2</td></tr>
+        <tr><td class="key">HMAC</td><td>Secreto, algoritmo, cabecera de firma y formato del string a firmar.</td><td class="num">F2</td></tr>
+        <tr><td class="key">OAuth2 client credentials</td><td>URL de token, client id, client secret, scope, y si las credenciales van en el body o como cabecera Basic.</td><td class="num">F5</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Solo OAuth2 se difiere, y por una única razón: es la única estrategia con <strong>estado</strong> —caché de token, expiración, refresco proactivo, protección de estampida—. Las demás son funciones puras de la configuración y entran completas en F2.</p>
+
+  <p>Las <strong>cabeceras personalizadas</strong> no son una estrategia: son un campo aparte, siempre disponible, que se combina con cualquiera de las anteriores. Un destino puede pedir Bearer <em>y</em> un <code>X-Tenant-Id</code> fijo.</p>
+
+  <h3>Estrategias de entrada</h3>
+
+  <p>Ninguna · API key en cabecera · Basic · Bearer · HMAC (algoritmo, cabecera de firma, formato del signing string y tolerancia de timestamp configurables) · lista blanca de IP. Todas en F2.</p>
+
+  <p>La tolerancia de timestamp en HMAC no es un detalle: sin ella, una firma válida capturada puede reproducirse indefinidamente.</p>
+
+  <h3>Almacenamiento y edición de secretos</h3>
+
+  <p>Un solo par de columnas por endpoint: <code>AuthType</code> discrimina, y <code>AuthConfigJson</code> guarda la forma que corresponda a ese tipo. El JSON se cifra <strong>entero</strong> con AES-GCM —no campo por campo— con clave maestra en variable de entorno y un número de versión para poder rotarla. Nada de ahí dentro se consulta nunca, así que no hay razón para dejar partes en claro ni riesgo de olvidar cifrar un campo nuevo.</p>
+
+  <p>La API nunca devuelve el bloque cifrado. Un <code>GET</code> responde con los campos no sensibles visibles y los secretos marcados como presentes:</p>
+
+  <pre><code>{ <span class="c-str">"authType"</span>: <span class="c-str">"ApiKey"</span>, <span class="c-str">"headerName"</span>: <span class="c-str">"X-API-Key"</span>, <span class="c-str">"secretSet"</span>: true }</code></pre>
+
+  <p>Y en el <code>PUT</code>, la ausencia del campo secreto significa <em>conservar el actual</em>; solo un valor nuevo lo reemplaza. Sin esa regla, corregir el nombre de una cabecera obligaría a volver a teclear la clave, y eso termina en secretos copiados y pegados por chat.</p>
+
+  <div class="note">
+    <span class="note-label">Probar conexión</span>
+    <p>Cada destino necesita un botón que dispare una petición de prueba con un payload de ejemplo y muestre la respuesta cruda —código, cabeceras, cuerpo—. Sin él, una autenticación mal configurada se descubre como un muro de entregas fallidas media hora después, y nadie sabe si el problema es el secreto, el nombre de la cabecera o la URL.</p>
+  </div>
+
+  <h2 id="proyectos">Estructura del proyecto</h2>
+
+  <div class="tree">WebhookGateway.sln
+├── <span class="hi">src/</span>
+│   ├── WebhookGateway.Domain          <span class="dim">entidades, enums, políticas · sin dependencias</span>
+│   ├── WebhookGateway.Application     <span class="dim">casos de uso e interfaces</span>
+│   │                                  <span class="dim">IPayloadStore, IQueuePublisher, IAuthValidator…</span>
+│   ├── WebhookGateway.Infrastructure  <span class="dim">EF Core + Dapper, cifrado, HttpClient factory</span>
+│   ├── WebhookGateway.Dispatcher      <span class="dim">worker, claim, reintentos, circuit breaker</span>
+│   └── WebhookGateway.Api             <span class="dim">/in/* recepción · /api/* panel · aloja el worker</span>
+├── <span class="hi">tests/</span>
+│   ├── WebhookGateway.UnitTests
+│   └── WebhookGateway.IntegrationTests <span class="dim">Testcontainers con SQL Server</span>
+└── <span class="hi">frontend/</span>                       <span class="dim">Vite + React + TypeScript</span></div>
+
+  <p>El despachador vive en su propio proyecto aunque se aloje dentro de la API. Separarlo en un servicio independiente el día que haga falta es un cambio de configuración, no una refactorización.</p>
+
+  <p>Dos accesos a datos, deliberadamente: <strong>EF Core para el CRUD de configuración</strong>, donde la productividad manda, y <strong>Dapper para el camino caliente</strong> —el claim, los inserts en batch, la búsqueda del panel— donde se necesita SQL exacto.</p>
+
+  <h3>Frontend</h3>
+
+  <p>Vite + React + TypeScript, TanStack Query para el estado del servidor, shadcn/ui sobre Tailwind. Se despliega como sitio estático en Render, que es gratis y no sufre spin-down.</p>
+
+  <p>Pantallas: integraciones, endpoints de entrada y salida, suscripciones (el mapa de fanout), <strong>explorador de mensajes</strong> con búsqueda, detalle e historial de intentos, replay individual y masivo, panel de métricas, usuarios y registro de auditoría.</p>
+
+  <p>El explorador de mensajes es la mitad del valor del producto. Merece más atención de la que su tamaño en el plan sugiere.</p>
+
+  <h2 id="render">Despliegue</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Componente</th><th>Configuración</th></tr></thead>
+      <tbody>
+        <tr><td class="key">API + worker</td><td>Servicio web Docker en Render, plan de 25 USD. Sin spin-down. El worker corre embebido.</td></tr>
+        <tr><td class="key">Panel</td><td>Sitio estático en Render. Gratis.</td></tr>
+        <tr><td class="key">Base de datos</td><td>SQL Server 2019 Enterprise propio, expuesto con TLS y firewall restringido a las IP de salida estáticas de Render.</td></tr>
+        <tr><td class="key">Región</td><td>La más cercana al servidor SQL. <strong>Medir el RTT antes de decidir</strong> — gobierna toda la latencia de entrada.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="note-label">No adjuntar disco persistente</span>
+    <p>Bufferear en disco local de Render parece atractivo como respaldo si SQL no responde, pero adjuntar un disco <strong>elimina los despliegues sin downtime y prohíbe escalar a más de una instancia</strong>, porque el disco solo se monta en una. Cambiaría un fallo raro por uno garantizado en cada despliegue. La respuesta correcta ante SQL caído es <code>503</code> con <code>Retry-After</code>.</p>
+  </div>
+
+  <h2 id="fases">Fases de implementación</h2>
+
+  <p class="lede">Cada fase deja algo funcionando de punta a punta. Se despliega desde la primera.</p>
+
+  <ol class="phases">
+    <li class="phase">
+      <div>
+        <h3>Fundaciones</h3>
+        <p>Nada visible todavía, pero define todo lo demás.</p>
+        <ul>
+          <li>Solución, proyectos, <code>docker-compose</code> con SQL Server para desarrollo local</li>
+          <li>Esquema completo, particionado, índices filtrados, migraciones</li>
+          <li>Cifrado de secretos con rotación de clave</li>
+          <li>Autenticación del panel: JWT con refresh, Argon2id</li>
+          <li>Pipeline de despliegue a Render funcionando con un endpoint de salud</li>
+        </ul>
+      </div>
+    </li>
+    <li class="phase">
+      <div>
+        <h3>Recepción</h3>
+        <p>El gateway ya recibe y no pierde nada, aunque todavía no entregue.</p>
+        <ul>
+          <li>Ruta dinámica <code>/in/{integracion}/{endpoint}</code> con lectura de body crudo</li>
+          <li>Validadores de entrada: ninguno, API key y HMAC</li>
+          <li>Deduplicación con la tabla dedicada</li>
+          <li>Persistencia transaccional de mensaje, payload y entregas por fanout</li>
+          <li>Micro-batch de inserción y respuesta <code>503</code> ante SQL caído</li>
+        </ul>
+      </div>
+    </li>
+    <li class="phase">
+      <div>
+        <h3>Despacho</h3>
+        <p>El núcleo. Aquí es donde el sistema cumple su promesa.</p>
+        <ul>
+          <li>Claim con lease, reparto justo por destino y barredor de leases huérfanos</li>
+          <li>Canal en memoria y sondeo de respaldo</li>
+          <li><code>HttpClient</code> por destino con concurrencia y token bucket</li>
+          <li>Backoff con jitter, clasificación de respuestas, <code>ExpiresAt</code></li>
+          <li>Circuit breaker persistido</li>
+          <li>Escritura en batch de intentos y apagado ordenado</li>
+        </ul>
+      </div>
+    </li>
+    <li class="phase">
+      <div>
+        <h3>Panel</h3>
+        <p>Sin esto el sistema funciona pero no es un producto.</p>
+        <ul>
+          <li>CRUD de integraciones, endpoints y suscripciones</li>
+          <li>Explorador de mensajes: búsqueda, detalle, historial de intentos</li>
+          <li>Replay individual y masivo</li>
+          <li>Pausar y reanudar destinos; cerrar circuitos a mano</li>
+        </ul>
+      </div>
+    </li>
+    <li class="phase">
+      <div>
+        <h3>Operación</h3>
+        <p>Lo que hace que el sistema se pueda dejar solo.</p>
+        <ul>
+          <li>Métricas y tablero: throughput, tasa de éxito, latencia, backlog por destino</li>
+          <li>Alertas: circuito abierto, entregas expiradas, backlog creciendo</li>
+          <li>Jobs de retención con <code>SWITCH PARTITION</code> y creación anticipada de particiones</li>
+          <li>Resource Governor en producción</li>
+          <li>Health checks que reflejen de verdad la conectividad a SQL</li>
+        </ul>
+      </div>
+    </li>
+    <li class="phase">
+      <div>
+        <h3>Extensiones</h3>
+        <p>Solo cuando lo anterior esté estable.</p>
+        <ul>
+          <li>OAuth2 client credentials de salida con caché de token</li>
+          <li><code>IPayloadStore</code> externo para cuerpos grandes con archivos adjuntos</li>
+          <li>Filtros por suscripción (entregar solo si el payload cumple una condición)</li>
+        </ul>
+      </div>
+    </li>
+  </ol>
+
+  <h2 id="riesgos">Riesgos abiertos</h2>
+
+  <div class="table-wrap bleed">
+    <table>
+      <thead><tr><th>Riesgo</th><th>Mitigación</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="key">El enlace Render → SQL</td>
+          <td>Es el único punto de fallo real. Cada webhook cruza internet antes de poder confirmarse. Se mitiga eligiendo bien la región, con micro-batch y respondiendo <code>503</code> en vez de aceptar y perder. No se elimina.</td>
+        </tr>
+        <tr>
+          <td class="key">Sobreingeniería</td>
+          <td>El riesgo más probable del proyecto. A este volumen no hay problema de rendimiento que resolver. Cada hora invertida en optimizar throughput es una hora que no va al panel, la autenticación o el replay.</td>
+        </tr>
+        <tr>
+          <td class="key">Crecimiento de destinos</td>
+          <td>50 hoy, sin techo definido. El reparto justo en el claim y el <code>HttpClient</code> por destino escalan bien hasta unos cientos. Más allá habría que revisar la estrategia de pooling.</td>
+        </tr>
+        <tr>
+          <td class="key">Orden de entrega</td>
+          <td>No se garantiza. Si algún destino llega a necesitar orden por entidad, requiere claves de partición y bloqueo por clave — un rediseño del claim, no un ajuste. Conviene confirmarlo antes de la fase de despacho.</td>
+        </tr>
+        <tr>
+          <td class="key">Archivos grandes</td>
+          <td>Fuera de alcance por ahora, pero la indirección <code>StorageRef</code> queda en el esquema desde el día uno para no tener que migrar después.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="closing">WebhookGateway · plan de arquitectura v1 · agosto 2026</p>
+
+</main>
+</body>
+</html>

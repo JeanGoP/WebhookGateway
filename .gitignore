@@ -1,0 +1,33 @@
+## .NET
+bin/
+obj/
+artifacts/
+[Dd]ebug/
+[Rr]elease/
+TestResults/
+*.user
+*.suo
+*.userprefs
+.vs/
+.idea/
+*.swp
+
+## Frontend — no se versiona ni se despliega en este repo (solo el backend).
+frontend/
+
+## Node (por si algún día se incluye)
+node_modules/
+npm-debug.log*
+
+## Local — nunca subir secretos
+.env
+.env.local
+appsettings.Development.local.json
+appsettings.Local.json
+*.pfx
+*.key
+
+## Varios
+*.log
+.DS_Store
+Thumbs.db

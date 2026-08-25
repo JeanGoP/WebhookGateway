@@ -1,0 +1,43 @@
+# Render Blueprint — WebhookGateway (solo backend)
+#
+# Un servicio: la API (.NET en Docker, con el worker de despacho dentro). La base de datos
+# es externa (SQL Server propio, por cadena de conexión). El panel NO se despliega aquí.
+#
+# Los valores `sync: false` se rellenan a mano en el panel de Render y nunca se guardan en
+# el repositorio. Ver docs/despliegue.md.
+
+services:
+  - type: web
+    name: webhookgateway-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Elige la región más cercana a tu SQL Server para minimizar latencia por consulta.
+    region: oregon
+    # 'starter' (siempre activo): el despachador tiene que correr sin dormirse. El plan
+    # gratuito se suspende por inactividad y dejaría de entregar.
+    plan: starter
+    # Liveness sin tocar SQL: un parpadeo de la base no reinicia el proceso.
+    healthCheckPath: /health/live
+    envVars:
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+
+      # --- Secretos: se rellenan en Render, nunca en el repo ---
+      - key: Gateway__Sql__ConnectionString
+        sync: false
+      - key: Gateway__Secrets__Keys__1
+        sync: false
+      - key: Gateway__Jwt__Key
+        sync: false
+
+      # --- No secretos ---
+      - key: Gateway__Secrets__CurrentKeyVersion
+        value: "1"
+
+      # Origen del panel para CORS. Déjalo sin definir mientras no haya un panel desplegado:
+      # con lista vacía, la API no acepta ningún navegador, que es lo correcto para una API
+      # que de momento solo recibe webhooks (server-to-server, sin CORS). Cuando despliegues
+      # el panel, pon aquí su URL (https://, sin barra final).
+      - key: Gateway__Cors__AllowedOrigins__0
+        sync: false

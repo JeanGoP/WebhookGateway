@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Core no referencia a nadie. Solo BCL.
+    Si necesitas un paquete aquí, la interfaz está en el sitio equivocado.
+  -->
+
+</Project>
