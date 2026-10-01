@@ -48,7 +48,7 @@ GO
 
 CREATE OR ALTER PROCEDURE dbo.sp_Gateway_PurgeExpiredPartitions
     @MetadataRetentionDays int = 365,
-    @PayloadRetentionDays  int = 90,
+    @PayloadRetentionDays  int = 30,
     @AttemptRetentionDays  int = 90,
     @DryRun                bit = 1   -- por defecto no borra: primero se mira qué haría
 AS
@@ -117,11 +117,26 @@ BEGIN
     CLOSE cur;
     DEALLOCATE cur;
 
-    /* Las claves de deduplicación son pocas y de vida corta: un DELETE normal basta. */
+    /* Purga por lotes con descanso para evitar contención de candados en ráfagas nocturnas */
     IF @DryRun = 0
     BEGIN
-        DELETE TOP (50000) FROM dbo.MessageDedupe WHERE ExpiresAt < SYSUTCDATETIME();
-        DELETE TOP (50000) FROM dbo.RefreshToken  WHERE ExpiresAt < DATEADD(DAY, -30, SYSUTCDATETIME());
+        DECLARE @deletedDedupe int = 1;
+        WHILE @deletedDedupe > 0
+        BEGIN
+            DELETE TOP (10000) FROM dbo.MessageDedupe WHERE ExpiresAt < SYSUTCDATETIME();
+            SET @deletedDedupe = @@ROWCOUNT;
+            IF @deletedDedupe > 0
+                WAITFOR DELAY '00:00:00.050';
+        END;
+
+        DECLARE @deletedRefresh int = 1;
+        WHILE @deletedRefresh > 0
+        BEGIN
+            DELETE TOP (10000) FROM dbo.RefreshToken WHERE ExpiresAt < DATEADD(DAY, -30, SYSUTCDATETIME());
+            SET @deletedRefresh = @@ROWCOUNT;
+            IF @deletedRefresh > 0
+                WAITFOR DELAY '00:00:00.050';
+        END;
     END
 
     SELECT TableName, Partitions, Cutoff, Rows, WouldDelete = @DryRun FROM @plan;

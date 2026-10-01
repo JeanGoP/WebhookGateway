@@ -32,4 +32,6 @@ public sealed class Integration
     public ICollection<InboundEndpoint> InboundEndpoints { get; } = [];
 
     public ICollection<OutboundEndpoint> OutboundEndpoints { get; } = [];
+
+    public ICollection<IntegrationEmailSubscriber> EmailSubscribers { get; } = [];
 }

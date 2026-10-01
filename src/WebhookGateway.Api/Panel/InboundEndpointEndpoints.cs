@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using WebhookGateway.Core.Domain;
 using WebhookGateway.Data;
+using WebhookGateway.Data.Configuration;
 using WebhookGateway.Data.Security;
 
 namespace WebhookGateway.Api.Panel;
@@ -32,6 +33,28 @@ public static class InboundEndpointEndpoints
         group.MapPut("/{id:int}", UpdateAsync)
             .Produces<InboundEndpointDto>()
             .Produces<ErrorResponse>(StatusCodes.Status404NotFound);
+
+        app.MapGet("/api/inbound-endpoints", ListGlobalAsync)
+            .WithTags("InboundEndpoints")
+            .RequireAuthorization()
+            .Produces<IReadOnlyList<InboundEndpointDto>>();
+    }
+
+    private static async Task<IResult> ListGlobalAsync(
+        int? integrationId, GatewayDbContext db, CancellationToken ct)
+    {
+        var query = db.InboundEndpoints.AsNoTracking();
+        if (integrationId.HasValue)
+        {
+            query = query.Where(e => e.IntegrationId == integrationId.Value);
+        }
+
+        var list = await query
+            .OrderBy(e => e.Name)
+            .Select(e => e.ToDto())
+            .ToListAsync(ct);
+
+        return Results.Ok(list);
     }
 
     private static async Task<IResult> ListAsync(int integrationId, GatewayDbContext db, CancellationToken ct)
@@ -59,7 +82,7 @@ public static class InboundEndpointEndpoints
 
     private static async Task<IResult> CreateAsync(
         int integrationId, InboundEndpointRequest request, GatewayDbContext db,
-        AuthConfigCodec codec, AuditService audit, HttpContext http, CancellationToken ct)
+        AuthConfigCodec codec, AuditService audit, HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Slug))
         {
@@ -102,6 +125,7 @@ public static class InboundEndpointEndpoints
         audit.Log(http.User, "create", "InboundEndpoint", null,
             new { entity.Name, entity.Slug, entity.AuthType }, PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         return Results.Created(
             $"/api/integrations/{integrationId.ToString(CultureInfo.InvariantCulture)}/inbound/{entity.Id.ToString(CultureInfo.InvariantCulture)}",
@@ -110,7 +134,7 @@ public static class InboundEndpointEndpoints
 
     private static async Task<IResult> UpdateAsync(
         int integrationId, int id, InboundEndpointRequest request, GatewayDbContext db,
-        AuthConfigCodec codec, AuditService audit, HttpContext http, CancellationToken ct)
+        AuthConfigCodec codec, AuditService audit, HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         var entity = await db.InboundEndpoints.AsTracking()
             .FirstOrDefaultAsync(e => e.Id == id && e.IntegrationId == integrationId, ct);
@@ -125,6 +149,7 @@ public static class InboundEndpointEndpoints
         audit.Log(http.User, "update", "InboundEndpoint", id.ToString(CultureInfo.InvariantCulture),
             new { request.Name, request.IsActive, request.AuthType }, PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         return Results.Ok(entity.ToDto());
     }

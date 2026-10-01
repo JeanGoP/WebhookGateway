@@ -32,7 +32,9 @@ public sealed record MessageDetailDto(
     int BodySizeBytes,
     MessageStatus Status,
     string EndpointName,
-    string IntegrationName);
+    string IntegrationName,
+    string EndpointSlug = "",
+    string IntegrationSlug = "");
 
 public sealed record DeliveryDto(
     long Id,
@@ -46,7 +48,8 @@ public sealed record DeliveryDto(
     string? LastError,
     DateTime? CompletedAt,
     string EndpointName,
-    string TargetUrl);
+    string TargetUrl,
+    string HttpMethod = "POST");
 
 public sealed record AttemptDto(
     long Id,
@@ -68,12 +71,12 @@ internal static class MessageDtoExtensions
     internal static MessageDetailDto ToDto(this MessageDetail m) => new(
         m.Id, m.ReceivedAt, m.InboundEndpointId, m.SourceIp, m.HttpMethod,
         m.HeadersJson, m.QueryString, m.BodySizeBytes, (MessageStatus)m.Status,
-        m.EndpointName, m.IntegrationName);
+        m.EndpointName, m.IntegrationName, m.EndpointSlug, m.IntegrationSlug);
 
     internal static DeliveryDto ToDto(this DeliverySummary d) => new(
         d.Id, d.CreatedAt, d.OutboundEndpointId, (DeliveryStatus)d.Status,
         d.AttemptCount, d.NextAttemptAt, d.ExpiresAt,
-        d.LastStatusCode, d.LastError, d.CompletedAt, d.EndpointName, d.TargetUrl);
+        d.LastStatusCode, d.LastError, d.CompletedAt, d.EndpointName, d.TargetUrl, d.HttpMethod);
 
     internal static AttemptDto ToDto(this AttemptDetail a) => new(
         a.Id, a.StartedAt, a.AttemptNumber, a.DurationMs, a.StatusCode,

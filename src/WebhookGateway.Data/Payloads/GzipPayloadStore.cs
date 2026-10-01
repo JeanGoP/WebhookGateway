@@ -70,7 +70,7 @@ public sealed class GzipPayloadStore : IPayloadStore
     {
         using var output = new MemoryStream(data.Length / 2);
 
-        using (var gzip = new GZipStream(output, CompressionLevel.Optimal, leaveOpen: true))
+        using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
         {
             gzip.Write(data);
         }

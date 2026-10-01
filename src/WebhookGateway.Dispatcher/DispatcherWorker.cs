@@ -21,7 +21,8 @@ public sealed class DispatcherWorker(
     ILogger<DispatcherWorker> logger) : BackgroundService
 {
     private readonly DispatcherOptions _options = options.Value;
-    private readonly SemaphoreSlim _wakeUp = new(0, 1);
+    private readonly WorkSignal _signal = new(queue);
+    private readonly CycleBackoff _backoff = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -33,27 +34,14 @@ public sealed class DispatcherWorker(
 
         logger.LogInformation("Despachador {WorkerId} en marcha.", _options.WorkerId);
 
-        // La cola en memoria solo sirve para no esperar el sondeo cuando acaba de llegar
-        // algo. Los identificadores en sí no se usan: la verdad está en SQL.
-        var listener = ListenForSignalsAsync(stoppingToken);
+        _signal.StartListening(stoppingToken);
         var nextMaintenance = DateTimeOffset.MinValue;
 
         try
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                if (clock.GetUtcNow() >= nextMaintenance)
-                {
-                    await RunMaintenanceAsync(stoppingToken);
-                    nextMaintenance = clock.GetUtcNow().AddSeconds(_options.MaintenanceIntervalSeconds);
-                }
-
-                var dispatched = await RunCycleAsync(stoppingToken);
-
-                if (dispatched == 0)
-                {
-                    await WaitForWorkAsync(stoppingToken);
-                }
+                nextMaintenance = await RunIterationAsync(nextMaintenance, stoppingToken);
             }
         }
         catch (OperationCanceledException)
@@ -62,10 +50,58 @@ public sealed class DispatcherWorker(
         }
         finally
         {
-            queue.Complete();
-            await listener;
+            await _signal.StopAsync();
             await ShutDownAsync();
         }
+    }
+
+    /// <summary>
+    /// Una pasada del bucle, con todo lo que pueda fallar contenido aquí dentro.
+    ///
+    /// Esto es lo que impide que una excepción escape de <c>ExecuteAsync</c>. El host trata un
+    /// <c>BackgroundService</c> que termina con fallo parando el proceso entero, y en este
+    /// proceso también vive la recepción: un timeout de SQL dejaría al gateway sin recibir
+    /// webhooks, no solo sin despacharlos. Mejor esperar y volver a intentarlo.
+    /// </summary>
+    /// <returns>Cuándo toca la siguiente pasada de mantenimiento.</returns>
+    private async Task<DateTimeOffset> RunIterationAsync(DateTimeOffset nextMaintenance, CancellationToken stoppingToken)
+    {
+        try
+        {
+            if (clock.GetUtcNow() >= nextMaintenance)
+            {
+                await RunMaintenanceAsync(stoppingToken);
+                nextMaintenance = clock.GetUtcNow().AddSeconds(_options.MaintenanceIntervalSeconds);
+            }
+
+            var dispatched = await RunCycleAsync(stoppingToken);
+            _backoff.Reset();
+
+            if (dispatched == 0)
+            {
+                await _signal.WaitAsync(TimeSpan.FromSeconds(_options.IdlePollSeconds), stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+#pragma warning disable CA1031 // Deliberado: el bucle sobrevive a cualquier fallo, pase lo que pase.
+        catch (Exception ex)
+        {
+            var wait = _backoff.NextDelay();
+
+            logger.LogError(
+                ex,
+                "Fallo en el ciclo del despachador ({Count} seguidos). Se reintenta en {Seconds:F0} s.",
+                _backoff.ConsecutiveFailures,
+                wait.TotalSeconds);
+
+            await Task.Delay(wait, clock, stoppingToken);
+        }
+#pragma warning restore CA1031
+
+        return nextMaintenance;
     }
 
     private async Task<int> RunCycleAsync(CancellationToken cancellationToken)
@@ -81,6 +117,9 @@ public sealed class DispatcherWorker(
             return 0;
         }
 
+        var messageIds = claimed.Select(d => d.MessageId);
+        var payloadsMap = await dispatcher.PreloadPayloadsAsync(messageIds, cancellationToken);
+
         /*
             Sin límite de paralelismo aquí a propósito: el freno real es el de cada destino,
             en EndpointThrottles. Un lote de cien entregas repartidas entre veinte destinos
@@ -90,7 +129,8 @@ public sealed class DispatcherWorker(
         {
             try
             {
-                await dispatcher.DispatchAsync(delivery, token);
+                payloadsMap.TryGetValue(delivery.MessageId, out var payload);
+                await dispatcher.DispatchAsync(delivery, payload, token);
             }
             catch (OperationCanceledException)
             {
@@ -127,38 +167,6 @@ public sealed class DispatcherWorker(
         }
     }
 
-    /// <summary>Duerme hasta que llegue algo nuevo o venza el sondeo, lo que pase antes.</summary>
-    private async Task WaitForWorkAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            await _wakeUp.WaitAsync(TimeSpan.FromSeconds(_options.IdlePollSeconds), cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-    }
-
-    private async Task ListenForSignalsAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            await foreach (var _ in queue.ReadAllAsync(cancellationToken))
-            {
-                // Basta con una señal: el ciclo reclama de SQL, no de la cola.
-                if (_wakeUp.CurrentCount == 0)
-                {
-                    _wakeUp.Release();
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Apagado normal.
-        }
-    }
-
     /// <summary>
     /// Apagado ordenado: volcar lo pendiente y soltar los leases que este worker aún tenga.
     /// Sin esto, las entregas en vuelo al desplegar esperarían a que venciera su lease.
@@ -185,7 +193,7 @@ public sealed class DispatcherWorker(
 
     public override void Dispose()
     {
-        _wakeUp.Dispose();
+        _signal.Dispose();
         base.Dispose();
     }
 }

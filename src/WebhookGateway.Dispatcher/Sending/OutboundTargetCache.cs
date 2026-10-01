@@ -14,6 +14,9 @@ namespace WebhookGateway.Dispatcher.Sending;
 /// <summary>Todo lo que el despachador necesita saber de un destino, ya resuelto y descifrado.</summary>
 public sealed record OutboundTarget(
     int Id,
+    int IntegrationId,
+    string IntegrationName,
+    string EndpointName,
     Uri TargetUrl,
     HttpMethod Method,
     OutboundAuthType AuthType,
@@ -68,6 +71,7 @@ public sealed class OutboundTargetCache(
         var db = scope.ServiceProvider.GetRequiredService<GatewayDbContext>();
 
         var endpoint = await db.OutboundEndpoints
+            .Include(e => e.Integration)
             .Where(e => e.Id == endpointId && e.IsActive)
             .FirstOrDefaultAsync(cancellationToken);
 
@@ -78,6 +82,9 @@ public sealed class OutboundTargetCache(
 
         return new OutboundTarget(
             endpoint.Id,
+            endpoint.IntegrationId,
+            endpoint.Integration?.Name ?? $"Integración #{endpoint.IntegrationId}",
+            endpoint.Name,
             new Uri(endpoint.TargetUrl),
             HttpMethod.Parse(endpoint.HttpMethod),
             endpoint.AuthType,

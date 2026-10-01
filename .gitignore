@@ -31,3 +31,6 @@ appsettings.Local.json
 *.log
 .DS_Store
 Thumbs.db
+
+## Salida de dotnet publish: artefacto de compilacion, no codigo.
+publish/

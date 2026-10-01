@@ -65,6 +65,7 @@ public static class ReceptionEndpoints
     {
         "reception.not_found" => Results.NotFound(new { error = error.Message }),
         "reception.body_too_large" => Results.Problem(error.Message, statusCode: StatusCodes.Status413PayloadTooLarge),
+        "reception.invalid_json" => Results.Problem(error.Message, statusCode: StatusCodes.Status400BadRequest),
         _ when error.Code.StartsWith("auth.", StringComparison.Ordinal) =>
             Results.Problem(error.Message, statusCode: StatusCodes.Status401Unauthorized),
         _ => Results.Problem(error.Message, statusCode: StatusCodes.Status500InternalServerError),

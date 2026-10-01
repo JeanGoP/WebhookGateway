@@ -36,6 +36,9 @@ $scripts = @(
     '02-traffic-tables.sql'
     '03-users-audit.sql'
     '04-partition-maintenance.sql'
+    '07-notifications.sql'
+    '08-endpoint-health.sql'
+    '09-subscribers.sql'
 )
 
 foreach ($script in $scripts) {

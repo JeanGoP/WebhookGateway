@@ -18,7 +18,8 @@ public sealed class MessageExplorer(ISqlConnectionFactory connectionFactory)
         FROM dbo.WebhookMessage AS m
         INNER JOIN dbo.InboundEndpoint AS e ON e.Id = m.InboundEndpointId
         INNER JOIN dbo.Integration AS i ON i.Id = e.IntegrationId
-        WHERE (@InboundEndpointId IS NULL OR m.InboundEndpointId = @InboundEndpointId)
+        WHERE (@IntegrationId IS NULL OR e.IntegrationId = @IntegrationId)
+          AND (@InboundEndpointId IS NULL OR m.InboundEndpointId = @InboundEndpointId)
           AND (@Status IS NULL OR m.Status = @Status)
           AND (@From IS NULL OR m.ReceivedAt >= @From)
           AND (@To IS NULL OR m.ReceivedAt < @To)
@@ -29,7 +30,8 @@ public sealed class MessageExplorer(ISqlConnectionFactory connectionFactory)
     private const string GetMessageSql = """
         SELECT m.Id, m.ReceivedAt, m.InboundEndpointId, m.SourceIp,
                m.HttpMethod, m.HeadersJson, m.QueryString, m.BodySizeBytes, m.Status,
-               e.Name AS EndpointName, i.Name AS IntegrationName
+               e.Name AS EndpointName, e.Slug AS EndpointSlug,
+               i.Name AS IntegrationName, i.Slug AS IntegrationSlug
         FROM dbo.WebhookMessage AS m
         INNER JOIN dbo.InboundEndpoint AS e ON e.Id = m.InboundEndpointId
         INNER JOIN dbo.Integration AS i ON i.Id = e.IntegrationId
@@ -40,7 +42,7 @@ public sealed class MessageExplorer(ISqlConnectionFactory connectionFactory)
         SELECT d.Id, d.CreatedAt, d.OutboundEndpointId, d.Status,
                d.AttemptCount, d.NextAttemptAt, d.ExpiresAt,
                d.LastStatusCode, d.LastError, d.CompletedAt,
-               o.Name AS EndpointName, o.TargetUrl
+               o.Name AS EndpointName, o.TargetUrl, o.HttpMethod
         FROM dbo.WebhookDelivery AS d
         INNER JOIN dbo.OutboundEndpoint AS o ON o.Id = d.OutboundEndpointId
         WHERE d.MessageId = @MessageId
@@ -64,6 +66,7 @@ public sealed class MessageExplorer(ISqlConnectionFactory connectionFactory)
             SearchMessagesSql,
             new
             {
+                query.IntegrationId,
                 query.InboundEndpointId,
                 Status = (byte?)query.Status,
                 query.From,
@@ -108,6 +111,7 @@ public sealed class MessageExplorer(ISqlConnectionFactory connectionFactory)
 // --- Query ---
 
 public sealed record MessageSearchQuery(
+    int? IntegrationId,
     int? InboundEndpointId,
     byte? Status,
     DateTime? From,
@@ -143,6 +147,8 @@ public sealed class MessageDetail
     public byte Status { get; init; }
     public string EndpointName { get; init; } = "";
     public string IntegrationName { get; init; } = "";
+    public string EndpointSlug { get; init; } = "";
+    public string IntegrationSlug { get; init; } = "";
 }
 
 public sealed class DeliverySummary
@@ -159,6 +165,7 @@ public sealed class DeliverySummary
     public DateTime? CompletedAt { get; init; }
     public string EndpointName { get; init; } = "";
     public string TargetUrl { get; init; } = "";
+    public string HttpMethod { get; init; } = "POST";
 }
 
 public sealed class AttemptDetail

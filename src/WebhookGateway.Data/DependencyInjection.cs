@@ -18,6 +18,10 @@ public static class DependencyInjection
     /// </summary>
     public static IServiceCollection AddGatewayData(this IServiceCollection services, IConfiguration configuration)
     {
+        DapperConfiguration.Apply();
+
+        services.AddMemoryCache();
+
         services.AddOptions<SqlOptions>()
             .Bind(configuration.GetSection(SqlOptions.SectionName))
             .ValidateOnStart();
@@ -38,6 +42,9 @@ public static class DependencyInjection
         services.AddSingleton<TrafficWriter>();
         services.AddSingleton<MessagePayloadReader>();
         services.AddSingleton<DeliveryRetryWriter>();
+
+        // La marca de versión vive mientras viva el proceso: es lo que invalida la caché de entrada.
+        services.AddSingleton<InboundConfigVersion>();
 
         // Consultas de configuración con EF Core: siguen el ámbito del DbContext.
         services.AddScoped<InboundEndpointLookup>();

@@ -130,11 +130,15 @@ app.MapReception();
 app.MapSetup();
 app.MapAuth();
 app.MapIntegrations();
+app.MapIntegrationLiveStatus();
 app.MapInboundEndpoints();
 app.MapOutboundEndpoints();
 app.MapSubscriptions();
 app.MapMessages();
 app.MapDeliveries();
+app.MapSubscribers();
+app.MapAlertActions();
+app.MapNotificationLogs();
 
 await app.RunAsync();
 

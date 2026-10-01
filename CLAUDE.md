@@ -9,6 +9,12 @@ contrato de trabajo: **léelo entero antes de escribir código y no lo contradig
 En qué punto está el trabajo, qué falta y qué decisiones quedaron abiertas:
 **`docs/estado-f4.md`**. Léelo también antes de continuar una fase a medias.
 
+> **Trabajo en curso (2026-10): escalar a 300.000–400.000 mensajes/día.** El plan, las
+> decisiones, las cifras medidas y el estado están en **`docs/plan-escala-400k.md`**. Léelo
+> antes de tocar el despachador, la base de datos o la configuración. Mientras dure ese
+> trabajo, sus cifras sustituyen a la tabla de abajo, y sus reglas para no afectar
+> producción (base `WebhookGateway_dev`, no ejecutar `db/00-database.sql`) son obligatorias.
+
 ---
 
 ## Las cifras que gobiernan las decisiones

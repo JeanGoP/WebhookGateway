@@ -1,10 +1,13 @@
+using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using System.Diagnostics;
 using WebhookGateway.Core.Delivery;
 using WebhookGateway.Core.Domain;
+using WebhookGateway.Core.Notifications;
 using WebhookGateway.Data.Traffic;
 using WebhookGateway.Dispatcher.Claiming;
+using WebhookGateway.Dispatcher.Notifications;
 using WebhookGateway.Dispatcher.Recording;
 using WebhookGateway.Dispatcher.Sending;
 using WebhookGateway.Dispatcher.Throttling;
@@ -22,13 +25,22 @@ public sealed class DeliveryDispatcher(
     EndpointThrottles throttles,
     EndpointBreakers breakers,
     DeliveryRecorder recorder,
+    NotificationStore notifications,
+    EndpointHealthTracker healthTracker,
     TimeProvider clock,
     IOptions<DispatcherOptions> options,
+    IOptions<NotificationOptions> notificationOptions,
     ILogger<DeliveryDispatcher> logger)
 {
     private readonly string _workerId = options.Value.WorkerId;
 
-    public async Task DispatchAsync(ClaimedDelivery delivery, CancellationToken cancellationToken)
+    public Task<Dictionary<long, OutgoingPayload>> PreloadPayloadsAsync(IEnumerable<long> messageIds, CancellationToken ct) =>
+        payloads.LoadBatchAsync(messageIds, ct);
+
+    public Task DispatchAsync(ClaimedDelivery delivery, CancellationToken cancellationToken) =>
+        DispatchAsync(delivery, null, cancellationToken);
+
+    public async Task DispatchAsync(ClaimedDelivery delivery, OutgoingPayload? payload, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(delivery);
 
@@ -41,15 +53,14 @@ public sealed class DeliveryDispatcher(
             return;
         }
 
-        // Circuito abierto: el destino está caído y no vamos a gastar un intento —ni la
-        // ventana de entrega— confirmándolo.
+        // Circuito abierto: el destino está caído y no vamos a gastar un intento confirmándolo.
         if (breakers.OpenUntil(target.Id) is { } openUntil)
         {
             Reschedule(delivery, openUntil.UtcDateTime, "El circuito del destino está abierto.");
             return;
         }
 
-        var payload = await payloads.LoadAsync(delivery.MessageId, delivery.CreatedAt, cancellationToken);
+        payload ??= await payloads.LoadAsync(delivery.MessageId, cancellationToken);
 
         if (payload is null)
         {
@@ -77,12 +88,21 @@ public sealed class DeliveryDispatcher(
 
         var verdict = AttemptClassifier.Classify(result.StatusCode);
         breakers.Record(target.Id, verdict, target.BreakerFailureThreshold, target.BreakerOpenSeconds);
+        await healthTracker.RecordAttemptAsync(target, verdict, (short?)result.StatusCode, result.ErrorMessage, cancellationToken);
 
         var attempt = new AttemptRecord(
             delivery.Id, startedAt, attemptNumber, (int)stopwatch.ElapsedMilliseconds,
             (short?)result.StatusCode, result.ResponseHeadersJson, result.ResponseBody, result.ErrorMessage, _workerId);
 
-        recorder.Add(attempt, Decide(delivery, target, result, verdict, attemptNumber));
+        var update = Decide(delivery, target, result, verdict, attemptNumber);
+        recorder.Add(attempt, update);
+
+        if ((update.Status == (byte)DeliveryStatus.Failed || update.Status == (byte)DeliveryStatus.Expired)
+            && notificationOptions.Value.Enabled
+            && !string.IsNullOrWhiteSpace(notificationOptions.Value.AdminEmail))
+        {
+            await EnqueueDeadLetterNotificationAsync(delivery, target, result, attemptNumber, cancellationToken);
+        }
     }
 
     /// <summary>Traduce el veredicto del intento al nuevo estado de la entrega.</summary>
@@ -139,4 +159,39 @@ public sealed class DeliveryDispatcher(
         ClaimedDelivery delivery, DeliveryStatus status, short attemptCount,
         DateTime nextAttemptAt, int? statusCode, string? lastError, DateTime? completedAt) =>
         new(delivery.Id, delivery.CreatedAt, (byte)status, attemptCount, nextAttemptAt, (short?)statusCode, lastError, completedAt);
+
+    private async Task EnqueueDeadLetterNotificationAsync(
+        ClaimedDelivery delivery,
+        OutboundTarget target,
+        SendResult result,
+        short attemptNumber,
+        CancellationToken cancellationToken)
+    {
+        var subject = $"[ALERTA] Entrega descartada: {target.IntegrationName} / {target.EndpointName}";
+        var details = new IncidentDetails(
+            IntegrationName: target.IntegrationName,
+            EndpointName: target.EndpointName,
+            TargetUrl: target.TargetUrl.ToString(),
+            StatusCode: (short?)result.StatusCode,
+            ErrorSummary: result.ErrorMessage ?? "Intentos de entrega agotados sin éxito.",
+            AttemptCount: attemptNumber,
+            OccurredAtUtc: clock.GetUtcNow().UtcDateTime,
+            DashboardUrl: $"{notificationOptions.Value.DashboardBaseUrl}/deliveries/{delivery.Id}");
+
+        var metadataJson = JsonSerializer.Serialize(details);
+
+        var subscribers = await notifications.GetVerifiedSubscriberEmailsAsync(target.IntegrationId, cancellationToken);
+        var recipients = new HashSet<string>(subscribers, StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(notificationOptions.Value.AdminEmail))
+        {
+            recipients.Add(notificationOptions.Value.AdminEmail);
+        }
+
+        foreach (var recipient in recipients)
+        {
+            await notifications.EnqueueAsync(
+                NotificationChannel.Email, recipient, target.IntegrationId, target.Id,
+                delivery.Id, NotificationAlertType.DeadLetter, subject, metadataJson, cancellationToken);
+        }
+    }
 }

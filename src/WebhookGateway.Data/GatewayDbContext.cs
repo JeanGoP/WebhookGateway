@@ -33,6 +33,10 @@ public sealed class GatewayDbContext(DbContextOptions<GatewayDbContext> options)
 
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
 
+    public DbSet<IntegrationEmailSubscriber> EmailSubscribers => Set<IntegrationEmailSubscriber>();
+
+    public DbSet<EndpointHealthState> EndpointHealthStates => Set<EndpointHealthState>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Integration>(e =>
@@ -104,6 +108,30 @@ public sealed class GatewayDbContext(DbContextOptions<GatewayDbContext> options)
             e.Property(x => x.EntityId).HasMaxLength(100).IsUnicode(false);
             e.Property(x => x.SourceIp).HasMaxLength(45).IsUnicode(false);
             e.HasIndex(x => x.OccurredAt);
+        });
+
+        modelBuilder.Entity<IntegrationEmailSubscriber>(e =>
+        {
+            e.ToTable("IntegrationEmailSubscriber");
+            e.Property(x => x.Email).HasMaxLength(320);
+            e.Property(x => x.VerificationToken).HasMaxLength(64).IsUnicode(false);
+            e.Property(x => x.UnsubscribeToken).HasMaxLength(64).IsUnicode(false);
+            e.Property(x => x.CreatedBy).HasMaxLength(200);
+            e.HasIndex(x => new { x.IntegrationId, x.Email }).IsUnique();
+            e.HasIndex(x => x.VerificationToken).IsUnique().HasFilter("[VerificationToken] IS NOT NULL");
+            e.HasIndex(x => x.UnsubscribeToken).IsUnique();
+            e.HasOne(x => x.Integration).WithMany(i => i.EmailSubscribers)
+                .HasForeignKey(x => x.IntegrationId);
+        });
+
+        modelBuilder.Entity<EndpointHealthState>(e =>
+        {
+            e.ToTable("EndpointHealthState");
+            e.HasKey(x => x.OutboundEndpointId);
+            e.Property(x => x.LastErrorMessage).HasMaxLength(1000);
+            e.HasOne(x => x.OutboundEndpoint)
+                .WithOne(o => o.HealthState)
+                .HasForeignKey<EndpointHealthState>(x => x.OutboundEndpointId);
         });
     }
 }

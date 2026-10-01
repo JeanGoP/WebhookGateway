@@ -1,3 +1,4 @@
+using System.Data;
 using Dapper;
 using WebhookGateway.Core.Abstractions;
 using WebhookGateway.Core.Domain;
@@ -6,117 +7,46 @@ using WebhookGateway.Data.Db;
 namespace WebhookGateway.Data.Traffic;
 
 /// <summary>
-/// Persiste lo que llega por <c>/in/*</c>: el mensaje, su cuerpo, la deduplicación y una
-/// entrega por cada suscripción activa. Todo en una sola transacción: o se guarda completo,
-/// o no se guarda nada y el emisor reintenta.
+/// Persiste lo que llega por <c>/in/*</c>: el mensaje, su cuerpo, la deduplicación y las
+/// entregas en un solo viaje de red mediante un Stored Procedure atómico con deduplicación optimista.
 /// </summary>
 public sealed class TrafficWriter(ISqlConnectionFactory connectionFactory)
 {
-    private const string CheckDedupeSql = """
-        SELECT MessageId FROM dbo.MessageDedupe WITH (UPDLOCK, HOLDLOCK)
-        WHERE InboundEndpointId = @InboundEndpointId AND DedupeKey = @DedupeKey;
-        """;
-
-    private const string InsertMessageSql = """
-        INSERT INTO dbo.WebhookMessage
-            (ReceivedAt, InboundEndpointId, SourceIp, HttpMethod, HeadersJson, QueryString, BodySizeBytes, BodyHash, Status)
-        OUTPUT INSERTED.Id
-        VALUES (@ReceivedAt, @InboundEndpointId, @SourceIp, @HttpMethod, @HeadersJson, @QueryString, @BodySizeBytes, @BodyHash, @Status);
-        """;
-
-    private const string InsertPayloadSql = """
-        INSERT INTO dbo.WebhookPayload (MessageId, ReceivedAt, Encoding, SizeBytes, Body, StorageRef)
-        VALUES (@MessageId, @ReceivedAt, @Encoding, @SizeBytes, @Body, @StorageRef);
-        """;
-
-    private const string InsertDedupeSql = """
-        INSERT INTO dbo.MessageDedupe (InboundEndpointId, DedupeKey, MessageId, ExpiresAt)
-        VALUES (@InboundEndpointId, @DedupeKey, @MessageId, @ExpiresAt);
-        """;
-
-    private const string InsertDeliverySql = """
-        INSERT INTO dbo.WebhookDelivery (CreatedAt, MessageId, OutboundEndpointId, Status, NextAttemptAt, ExpiresAt)
-        OUTPUT INSERTED.Id
-        VALUES (@CreatedAt, @MessageId, @OutboundEndpointId, @Status, @NextAttemptAt, @ExpiresAt);
-        """;
+    private const string SpName = "dbo.sp_Traffic_WriteInbound";
 
     public async Task<TrafficWriteResult> WriteAsync(TrafficWriteRequest request, CancellationToken cancellationToken)
     {
         using var connection = await connectionFactory.OpenAsync(cancellationToken);
-        using var transaction = connection.BeginTransaction();
 
-        long? existingMessageId = request.DedupeKey is null
-            ? null
-            : await connection.QuerySingleOrDefaultAsync<long?>(new CommandDefinition(
-                CheckDedupeSql,
-                new { request.InboundEndpointId, DedupeKey = request.DedupeKey },
-                transaction,
-                cancellationToken: cancellationToken));
-
-        var isDuplicate = existingMessageId is not null;
-        var status = isDuplicate ? MessageStatus.Duplicate
-            : request.Deliveries.Count == 0 ? MessageStatus.NoSubscriptions
-            : MessageStatus.Received;
-
-        var messageId = await connection.ExecuteScalarAsync<long>(new CommandDefinition(
-            InsertMessageSql,
+        using var multi = await connection.QueryMultipleAsync(new CommandDefinition(
+            SpName,
             new
             {
-                request.ReceivedAt, request.InboundEndpointId, request.SourceIp, request.HttpMethod,
-                request.HeadersJson, request.QueryString, request.BodySizeBytes, request.BodyHash,
-                Status = (byte)status,
+                request.InboundEndpointId,
+                request.ReceivedAt,
+                request.SourceIp,
+                request.HttpMethod,
+                request.HeadersJson,
+                request.QueryString,
+                request.BodySizeBytes,
+                request.BodyHash,
+                request.DedupeKey,
+                request.DedupeExpiresAt,
+                PayloadEncoding = (byte)request.Payload.Encoding,
+                PayloadSizeBytes = request.Payload.SizeBytes,
+                PayloadBody = request.Payload.Body,
+                PayloadStorageRef = request.Payload.StorageRef,
             },
-            transaction,
+            commandType: CommandType.StoredProcedure,
             cancellationToken: cancellationToken));
 
-        await connection.ExecuteAsync(new CommandDefinition(
-            InsertPayloadSql,
-            new
-            {
-                MessageId = messageId, request.ReceivedAt, Encoding = (byte)request.Payload.Encoding,
-                request.Payload.SizeBytes, request.Payload.Body, request.Payload.StorageRef,
-            },
-            transaction,
-            cancellationToken: cancellationToken));
+        var header = await multi.ReadSingleAsync<WriteHeaderRow>();
+        var deliveryIds = (await multi.ReadAsync<long>()).ToList();
 
-        if (!isDuplicate && request.DedupeKey is not null)
-        {
-            await connection.ExecuteAsync(new CommandDefinition(
-                InsertDedupeSql,
-                new
-                {
-                    request.InboundEndpointId, DedupeKey = request.DedupeKey, MessageId = messageId,
-                    ExpiresAt = request.DedupeExpiresAt,
-                },
-                transaction,
-                cancellationToken: cancellationToken));
-        }
-
-        var deliveryIds = new List<long>(isDuplicate ? 0 : request.Deliveries.Count);
-
-        if (!isDuplicate)
-        {
-            foreach (var delivery in request.Deliveries)
-            {
-                var deliveryId = await connection.ExecuteScalarAsync<long>(new CommandDefinition(
-                    InsertDeliverySql,
-                    new
-                    {
-                        CreatedAt = request.ReceivedAt, MessageId = messageId, delivery.OutboundEndpointId,
-                        Status = (byte)DeliveryStatus.Pending, NextAttemptAt = request.ReceivedAt,
-                        ExpiresAt = request.ReceivedAt.AddHours(delivery.DeliveryWindowHours),
-                    },
-                    transaction,
-                    cancellationToken: cancellationToken));
-
-                deliveryIds.Add(deliveryId);
-            }
-        }
-
-        transaction.Commit();
-
-        return new TrafficWriteResult(messageId, status, deliveryIds, existingMessageId);
+        return new TrafficWriteResult(header.MessageId, (MessageStatus)header.Status, deliveryIds, header.ExistingMessageId);
     }
+
+    private sealed record WriteHeaderRow(long MessageId, byte Status, long? ExistingMessageId);
 }
 
 /// <param name="Payload">

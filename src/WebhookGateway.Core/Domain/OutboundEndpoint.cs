@@ -69,6 +69,8 @@ public sealed class OutboundEndpoint
 
     public ICollection<Subscription> Subscriptions { get; } = [];
 
+    public EndpointHealthState? HealthState { get; set; }
+
     public ProtectedSecret AuthConfig
     {
         get => new(AuthConfigCipher, AuthConfigKeyVersion);

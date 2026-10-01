@@ -3,7 +3,9 @@ using Microsoft.Extensions.DependencyInjection;
 using WebhookGateway.Core.Abstractions;
 using WebhookGateway.Core.Auth;
 using WebhookGateway.Core.Auth.Providers;
+using WebhookGateway.Core.Notifications;
 using WebhookGateway.Dispatcher.Claiming;
+using WebhookGateway.Dispatcher.Notifications;
 using WebhookGateway.Dispatcher.Queue;
 using WebhookGateway.Dispatcher.Recording;
 using WebhookGateway.Dispatcher.Sending;
@@ -70,7 +72,15 @@ public static class DependencyInjection
         services.AddSingleton<EndpointBreakers>();
         services.AddSingleton<DeliveryDispatcher>();
 
+        services.AddOptions<NotificationOptions>()
+            .Bind(configuration.GetSection(NotificationOptions.SectionName));
+
+        services.AddSingleton<NotificationStore>();
+        services.AddSingleton<SmtpNotificationSender>();
+        services.AddSingleton<EndpointHealthTracker>();
+
         services.AddHostedService<DispatcherWorker>();
+        services.AddHostedService<NotificationWorker>();
 
         return services;
     }

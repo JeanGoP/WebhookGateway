@@ -24,6 +24,7 @@ public sealed class AuthConfigCodec(ISecretProtector protector)
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
     };
 
     public ProtectedSecret Encode(OutboundAuthConfig config)

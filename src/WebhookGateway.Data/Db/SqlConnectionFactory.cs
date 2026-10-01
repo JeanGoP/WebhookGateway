@@ -12,11 +12,9 @@ public sealed class SqlOptions
     public string ConnectionString { get; set; } = string.Empty;
 
     /// <summary>
-    /// Techo del pool. Acotado a propósito: la instancia es compartida y el gateway no
-    /// tiene por qué poder monopolizar sus conexiones. Con 33 peticiones por segundo en
-    /// el peor pico, 30 sobran.
+    /// Techo del pool. Dimensionado para alta concurrencia (hasta 300 req/s en ráfagas).
     /// </summary>
-    public int MaxPoolSize { get; set; } = 30;
+    public int MaxPoolSize { get; set; } = 120;
 
     /// <summary>Segundos antes de rendirse al abrir. Corto: preferimos fallar y devolver 503.</summary>
     public int ConnectTimeoutSeconds { get; set; } = 5;

@@ -2,6 +2,7 @@ using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using WebhookGateway.Core.Domain;
 using WebhookGateway.Data;
+using WebhookGateway.Data.Configuration;
 
 namespace WebhookGateway.Api.Panel;
 
@@ -39,7 +40,16 @@ public static class IntegrationEndpoints
     {
         var list = await db.Integrations
             .OrderBy(i => i.Name)
-            .Select(i => i.ToListDto())
+            .Select(i => new IntegrationDto(
+                i.Id, i.Name, i.Slug, i.Description, i.IsActive,
+                i.RetentionDays, i.PayloadRetentionDays, i.CreatedAt,
+                i.OutboundEndpoints.Count == 0 ? "NoEndpoints" :
+                i.OutboundEndpoints.Any(o => o.HealthState != null && o.HealthState.HealthStatus == 2) ? "Down" :
+                i.OutboundEndpoints.Any(o => o.HealthState != null && o.HealthState.HealthStatus == 1) ? "Degraded" : "Healthy",
+                i.OutboundEndpoints.Count,
+                i.OutboundEndpoints.Count(o => o.HealthState == null || o.HealthState.HealthStatus == 0 || o.HealthState.HealthStatus == 3),
+                i.OutboundEndpoints.Count(o => o.HealthState != null && o.HealthState.HealthStatus == 1),
+                i.OutboundEndpoints.Count(o => o.HealthState != null && o.HealthState.HealthStatus == 2)))
             .ToListAsync(ct);
 
         return Results.Ok(list);
@@ -49,10 +59,19 @@ public static class IntegrationEndpoints
     {
         var integration = await db.Integrations
             .Where(i => i.Id == id)
-            .Select(i => i.ToDetailDto(
+            .Select(i => new IntegrationDetailDto(
+                i.Id, i.Name, i.Slug, i.Description, i.IsActive,
+                i.RetentionDays, i.PayloadRetentionDays, i.CreatedAt,
                 i.InboundEndpoints.Count(e => e.IsActive),
                 i.OutboundEndpoints.Count(e => e.IsActive),
-                i.InboundEndpoints.SelectMany(e => e.Subscriptions).Count(s => s.IsActive)))
+                i.InboundEndpoints.SelectMany(e => e.Subscriptions).Count(s => s.IsActive),
+                i.OutboundEndpoints.Count == 0 ? "NoEndpoints" :
+                i.OutboundEndpoints.Any(o => o.HealthState != null && o.HealthState.HealthStatus == 2) ? "Down" :
+                i.OutboundEndpoints.Any(o => o.HealthState != null && o.HealthState.HealthStatus == 1) ? "Degraded" : "Healthy",
+                i.OutboundEndpoints.Count,
+                i.OutboundEndpoints.Count(o => o.HealthState == null || o.HealthState.HealthStatus == 0 || o.HealthState.HealthStatus == 3),
+                i.OutboundEndpoints.Count(o => o.HealthState != null && o.HealthState.HealthStatus == 1),
+                i.OutboundEndpoints.Count(o => o.HealthState != null && o.HealthState.HealthStatus == 2)))
             .FirstOrDefaultAsync(ct);
 
         return integration is null
@@ -62,7 +81,7 @@ public static class IntegrationEndpoints
 
     private static async Task<IResult> CreateAsync(
         IntegrationRequest request, GatewayDbContext db, AuditService audit,
-        HttpContext http, CancellationToken ct)
+        HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Slug))
         {
@@ -89,6 +108,7 @@ public static class IntegrationEndpoints
         audit.Log(http.User, "create", "Integration", null,
             new { entity.Name, entity.Slug }, PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         return Results.Created(
             $"/api/integrations/{entity.Id.ToString(CultureInfo.InvariantCulture)}",
@@ -97,7 +117,7 @@ public static class IntegrationEndpoints
 
     private static async Task<IResult> UpdateAsync(
         int id, IntegrationRequest request, GatewayDbContext db, AuditService audit,
-        HttpContext http, CancellationToken ct)
+        HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         var entity = await db.Integrations.AsTracking().FirstOrDefaultAsync(i => i.Id == id, ct);
 
@@ -134,12 +154,13 @@ public static class IntegrationEndpoints
         audit.Log(http.User, "update", "Integration", id.ToString(CultureInfo.InvariantCulture),
             new { request.Name, request.IsActive }, PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         return Results.Ok(entity.ToListDto());
     }
 
     private static async Task<IResult> DeleteAsync(
-        int id, GatewayDbContext db, AuditService audit, HttpContext http, CancellationToken ct)
+        int id, GatewayDbContext db, AuditService audit, HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         var entity = await db.Integrations.AsTracking().FirstOrDefaultAsync(i => i.Id == id, ct);
 
@@ -154,6 +175,7 @@ public static class IntegrationEndpoints
         audit.Log(http.User, "deactivate", "Integration", id.ToString(CultureInfo.InvariantCulture),
             null, PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         return Results.NoContent();
     }

@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using WebhookGateway.Core.Domain;
 using WebhookGateway.Data;
+using WebhookGateway.Data.Configuration;
 using WebhookGateway.Data.Security;
 
 namespace WebhookGateway.Api.Panel;
@@ -36,6 +37,7 @@ public static class OutboundEndpointEndpoints
     private static async Task<IResult> ListAsync(int integrationId, GatewayDbContext db, CancellationToken ct)
     {
         var list = await db.OutboundEndpoints
+            .Include(e => e.HealthState)
             .Where(e => e.IntegrationId == integrationId)
             .OrderBy(e => e.Name)
             .Select(e => e.ToDto())
@@ -47,6 +49,7 @@ public static class OutboundEndpointEndpoints
     private static async Task<IResult> GetAsync(int integrationId, int id, GatewayDbContext db, CancellationToken ct)
     {
         var entity = await db.OutboundEndpoints
+            .Include(e => e.HealthState)
             .Where(e => e.Id == id && e.IntegrationId == integrationId)
             .Select(e => e.ToDto())
             .FirstOrDefaultAsync(ct);
@@ -58,7 +61,7 @@ public static class OutboundEndpointEndpoints
 
     private static async Task<IResult> CreateAsync(
         int integrationId, OutboundEndpointRequest request, GatewayDbContext db,
-        AuthConfigCodec codec, AuditService audit, HttpContext http, CancellationToken ct)
+        AuthConfigCodec codec, AuditService audit, HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.TargetUrl))
         {
@@ -100,6 +103,7 @@ public static class OutboundEndpointEndpoints
         audit.Log(http.User, "create", "OutboundEndpoint", null,
             new { entity.Name, entity.TargetUrl, entity.AuthType }, PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         return Results.Created(
             $"/api/integrations/{integrationId.ToString(CultureInfo.InvariantCulture)}/outbound/{entity.Id.ToString(CultureInfo.InvariantCulture)}",
@@ -108,7 +112,7 @@ public static class OutboundEndpointEndpoints
 
     private static async Task<IResult> UpdateAsync(
         int integrationId, int id, OutboundEndpointRequest request, GatewayDbContext db,
-        AuthConfigCodec codec, AuditService audit, HttpContext http, CancellationToken ct)
+        AuthConfigCodec codec, AuditService audit, HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         var entity = await db.OutboundEndpoints.AsTracking()
             .FirstOrDefaultAsync(e => e.Id == id && e.IntegrationId == integrationId, ct);
@@ -124,6 +128,7 @@ public static class OutboundEndpointEndpoints
             new { request.Name, request.IsActive, request.AuthType, request.TargetUrl },
             PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         return Results.Ok(entity.ToDto());
     }

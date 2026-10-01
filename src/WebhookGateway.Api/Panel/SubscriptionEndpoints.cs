@@ -2,6 +2,7 @@ using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using WebhookGateway.Core.Domain;
 using WebhookGateway.Data;
+using WebhookGateway.Data.Configuration;
 
 namespace WebhookGateway.Api.Panel;
 
@@ -61,7 +62,7 @@ public static class SubscriptionEndpoints
 
     private static async Task<IResult> CreateAsync(
         SubscriptionRequest request, GatewayDbContext db,
-        AuditService audit, HttpContext http, CancellationToken ct)
+        AuditService audit, HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         if (request.InboundEndpointId is null || request.OutboundEndpointId is null)
         {
@@ -97,6 +98,7 @@ public static class SubscriptionEndpoints
             new { request.InboundEndpointId, request.OutboundEndpointId },
             PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         // Cargar las navegaciones para el DTO de respuesta.
         await db.Entry(entity).Reference(s => s.InboundEndpoint).LoadAsync(ct);
@@ -109,7 +111,7 @@ public static class SubscriptionEndpoints
 
     private static async Task<IResult> UpdateAsync(
         int id, SubscriptionUpdateRequest request, GatewayDbContext db,
-        AuditService audit, HttpContext http, CancellationToken ct)
+        AuditService audit, HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         var entity = await db.Subscriptions.AsTracking().FirstOrDefaultAsync(s => s.Id == id, ct);
 
@@ -126,12 +128,13 @@ public static class SubscriptionEndpoints
         audit.Log(http.User, "update", "Subscription", id.ToString(CultureInfo.InvariantCulture),
             new { request.IsActive }, PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         return Results.Ok(entity.ToDto());
     }
 
     private static async Task<IResult> DeleteAsync(
-        int id, GatewayDbContext db, AuditService audit, HttpContext http, CancellationToken ct)
+        int id, GatewayDbContext db, AuditService audit, HttpContext http, InboundConfigVersion inboundConfig, CancellationToken ct)
     {
         var entity = await db.Subscriptions.AsTracking().FirstOrDefaultAsync(s => s.Id == id, ct);
 
@@ -146,6 +149,7 @@ public static class SubscriptionEndpoints
         audit.Log(http.User, "deactivate", "Subscription", id.ToString(CultureInfo.InvariantCulture),
             null, PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
+        inboundConfig.Invalidate();
 
         return Results.NoContent();
     }

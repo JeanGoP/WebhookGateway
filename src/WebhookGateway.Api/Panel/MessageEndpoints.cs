@@ -27,12 +27,12 @@ public static class MessageEndpoints
     }
 
     private static async Task<IResult> SearchAsync(
-        int? inboundEndpointId, byte? status,
+        int? integrationId, int? inboundEndpointId, byte? status,
         DateTime? from, DateTime? to,
         long? afterId, int? pageSize,
         MessageExplorer explorer, CancellationToken ct)
     {
-        var query = new MessageSearchQuery(inboundEndpointId, status, from, to, afterId, pageSize);
+        var query = new MessageSearchQuery(integrationId, inboundEndpointId, status, from, to, afterId, pageSize);
         var results = await explorer.SearchAsync(query, ct);
 
         return Results.Ok(results.Select(m => m.ToDto()).ToList());
@@ -62,10 +62,12 @@ public static class MessageEndpoints
         obligaría a leer la tabla de payloads en cada vista.
     */
     private static async Task<IResult> GetBodyAsync(
-        long id, MessageExplorer explorer, MessagePayloadReader reader, CancellationToken ct)
+        long id, MessageExplorer explorer, MessagePayloadReader reader,
+        ILoggerFactory loggerFactory, CancellationToken ct)
     {
-        // Hace falta el ReceivedAt para localizar el cuerpo con un seek sobre la clave
-        // agrupada (ReceivedAt, MessageId) en lugar de recorrer todas las particiones.
+        // Se consulta el mensaje para poder distinguir las dos ausencias: que no exista el
+        // mensaje y que exista pero sin cuerpo. El lector del cuerpo localiza la fecha por su
+        // cuenta, así que ya no depende de lo que devuelva esta consulta.
         var message = await explorer.GetMessageAsync(id, ct);
 
         if (message is null)
@@ -73,13 +75,26 @@ public static class MessageEndpoints
             return Results.NotFound(new ErrorResponse("Mensaje no encontrado."));
         }
 
-        var payload = await reader.LoadAsync(id, message.ReceivedAt, ct);
+        var payload = await reader.LoadAsync(id, ct);
 
-        // Que el cuerpo ya no esté no es un fallo: su retención es más corta que la de la
-        // metadata a propósito. El panel debe poder decirlo con esas palabras.
-        return payload is null
-            ? Results.NotFound(new ErrorResponse(
-                "El cuerpo de este mensaje ya se purgó. La metadata se conserva más tiempo que el cuerpo."))
-            : Results.Ok(MessageBodyFactory.From(id, payload));
+        /*
+            Que el cuerpo ya no esté puede ser normal —su retención es más corta que la de la
+            metadata— o puede ser un fallo. Distinguirlo desde fuera es imposible, así que
+            queda registrado: si esto aparece para un mensaje reciente, no se purgó nada y hay
+            algo que mirar.
+        */
+        if (payload is null)
+        {
+            loggerFactory
+                .CreateLogger("WebhookGateway.Api.Panel.Messages")
+                .LogWarning(
+                    "Sin cuerpo para el mensaje {MessageId}, recibido el {ReceivedAt:O}. La metadata está, pero la consulta no devolvió fila de WebhookPayload.",
+                    id, message.ReceivedAt);
+
+            return Results.NotFound(new ErrorResponse(
+                "El cuerpo de este mensaje no está en la base de datos. Si el mensaje es reciente no se ha purgado: revisa el registro del servidor."));
+        }
+
+        return Results.Ok(MessageBodyFactory.From(id, payload));
     }
 }

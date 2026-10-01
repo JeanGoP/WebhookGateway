@@ -16,23 +16,11 @@ internal static class CorsSetup
     internal static IServiceCollection AddPanelCors(
         this IServiceCollection services, IConfiguration configuration)
     {
-        var origins = configuration.GetSection("Gateway:Cors:AllowedOrigins").Get<string[]>() ?? [];
-
         return services.AddCors(options => options.AddPolicy(PolicyName, policy =>
         {
-            if (origins.Length == 0)
-            {
-                return;
-            }
-
-            /*
-                Sin AllowCredentials: la sesión viaja en la cabecera Authorization, no en
-                una cookie. Permitir credenciales abriría la puerta a que el navegador
-                adjuntase cookies de sesión a peticiones cruzadas sin que nadie lo pida.
-            */
-            policy.WithOrigins(origins)
+            policy.AllowAnyOrigin()
                 .AllowAnyHeader()
-                .WithMethods("GET", "POST", "PUT", "DELETE", "OPTIONS");
+                .AllowAnyMethod();
         }));
     }
 }

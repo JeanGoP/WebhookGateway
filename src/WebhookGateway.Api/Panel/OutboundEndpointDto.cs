@@ -43,7 +43,12 @@ public sealed record OutboundEndpointDto(
     string? BackoffLadderJson,
     int BreakerFailureThreshold,
     int BreakerOpenSeconds,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    string HealthStatus = "Healthy",
+    int ConsecutiveFailures = 0,
+    short? LastStatusCode = null,
+    string? LastErrorMessage = null,
+    DateTime? LastTransitionAt = null);
 
 internal static class OutboundEndpointDtoExtensions
 {
@@ -54,7 +59,20 @@ internal static class OutboundEndpointDtoExtensions
         e.CustomHeadersJson,
         e.RateLimitPerMinute, e.MaxConcurrency, e.TimeoutSeconds,
         e.MaxAttempts, e.DeliveryWindowHours, e.BackoffLadderJson,
-        e.BreakerFailureThreshold, e.BreakerOpenSeconds, e.CreatedAt);
+        e.BreakerFailureThreshold, e.BreakerOpenSeconds, e.CreatedAt,
+        HealthStatus: e.HealthState is null ? "Healthy" : MapStatus(e.HealthState.HealthStatus),
+        ConsecutiveFailures: e.HealthState?.ConsecutiveFailures ?? 0,
+        LastStatusCode: e.HealthState?.LastStatusCode,
+        LastErrorMessage: e.HealthState?.LastErrorMessage,
+        LastTransitionAt: e.HealthState?.LastTransitionAt);
+
+    private static string MapStatus(byte status) => status switch
+    {
+        1 => "Degraded",
+        2 => "Down",
+        3 => "Recovered",
+        _ => "Healthy"
+    };
 }
 
 internal static class OutboundEndpointPatch
