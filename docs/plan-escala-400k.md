@@ -247,7 +247,26 @@ test en contenedor lo demuestra sin tocar nada de nadie.
       2 s y otro al instante, y comprobar que el rápido termina sin esperar al lento. Encaja con la
       prueba de carga de la fase 6, que ya contempla ese escenario.
 
-**Cómo verificarlo todo.** `dotnet build` queda sin avisos. Los unitarios **no se pudieron
+**Verificado contra `WebhookGateway_dev` (2026-10-01).** Sin Docker no se puede ver el despachador
+entero funcionando, pero el SQL nuevo y el índice sí se probaron contra el motor real, sembrando
+entregas dentro de una transacción que luego se deshizo (quedaron 0 filas de prueba):
+
+- `db/11` aplicado. Clave `(OutboundEndpointId, NextAttemptAt)`, con `CreatedAt` presente por
+  alineación de particiones —`key_ordinal = 0`, `partition_ordinal = 1`—, igual que en el índice
+  anterior. Es lo que permite que el claim devuelva la clave completa `(CreatedAt, Id)` sin ir a la
+  tabla. Como el claim no filtra por `CreatedAt`, la búsqueda ocurre una vez por partición; eso ya
+  pasaba con el índice viejo, así que no es un cambio a peor.
+- Descubrimiento: con 40 pendientes vencidas en un destino, 3 en otro, 1 programada para más tarde y
+  1 fuera de ventana, devolvió exactamente los dos primeros.
+- Claim por destino: pidiendo al destino con 3, devolvió 3 y solo de ese destino; las 40 del
+  saturado quedaron intactas. Pidiendo al saturado con tope 20, devolvió 20.
+- `sys.dm_db_index_usage_stats` registró 2 *seeks* en el índice nuevo y 0 *scans*: los dos claims
+  lo usaron como búsqueda, que es para lo que está.
+
+Lo que esto **no** prueba: que las bombas por destino avancen de verdad en paralelo, ni el techo de
+capacidad, ni que un destino lento no frene a los demás. Eso necesita la suite de integración.
+
+**Cómo verificar el resto.** `dotnet build` queda sin avisos. Los unitarios **no se pudieron
 ejecutar**: Control de aplicaciones de Windows (Smart App Control, `VerifiedAndReputablePolicyState
 = 1`) bloquea la DLL de test recién compilada con `0x800711C7`, en Debug y en Release. Antes de
 añadir `EndpointThrottlesTests` sí corrieron: 129 verdes y los 30 de `RateBudget`. Lo que queda sin
