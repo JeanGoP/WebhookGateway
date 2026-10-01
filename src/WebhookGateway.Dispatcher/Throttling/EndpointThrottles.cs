@@ -12,15 +12,12 @@ namespace WebhookGateway.Dispatcher.Throttling;
 /// destino que solo tolera 60 es exactamente para lo que existe el gateway, y este es el
 /// sitio donde ocurre.
 /// <para>
-/// El cubo permite una ráfaga de cinco segundos de presupuesto antes de imponer el ritmo:
-/// sin nada de ráfaga la entrega se vuelve innecesariamente lenta, y con demasiada deja de
-/// proteger al destino.
+/// Las cifras del cubo —cada cuánto repone, cuántas fichas y cuánta ráfaga admite— las calcula
+/// <see cref="RateBudget"/>.
 /// </para>
 /// </remarks>
 public sealed class EndpointThrottles : IDisposable
 {
-    private const int BurstSeconds = 5;
-
     private readonly ConcurrentDictionary<int, Throttle> _throttles = new();
 
     /// <summary>
@@ -95,13 +92,13 @@ public sealed class EndpointThrottles : IDisposable
                 return new Throttle(slots, null, target.MaxConcurrency, target.RateLimitPerMinute);
             }
 
-            var perSecond = Math.Max(1, (int)Math.Ceiling(target.RateLimitPerMinute / 60.0));
+            var budget = RateBudget.For(target.RateLimitPerMinute);
 
             var limiter = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
             {
-                TokenLimit = perSecond * BurstSeconds,
-                TokensPerPeriod = perSecond,
-                ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+                TokenLimit = budget.BurstLimit,
+                TokensPerPeriod = budget.TokensPerPeriod,
+                ReplenishmentPeriod = budget.Period,
                 AutoReplenishment = true,
                 QueueLimit = Math.Max(target.MaxConcurrency, 64),
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst,

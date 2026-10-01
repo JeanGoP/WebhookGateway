@@ -16,6 +16,11 @@ public sealed class DeliveryClaimTests(SqlServerFixture fixture)
     // Hora fija: el claim la recibe por parámetro, así que la prueba es determinista.
     private static readonly DateTime Now = new(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>
+    /// Obligatorio según CLAUDE.md. Con el claim por destino la contención se concentra: todos los
+    /// workers pelean por las mismas filas del mismo destino, que es el peor caso para READPAST y
+    /// UPDLOCK. Si el claim no fuese atómico, aquí saldría una entrega repetida.
+    /// </summary>
     [RequiresDockerFact]
     public async Task Claim_bajo_workers_concurrentes_no_duplica_ni_pierde_ninguna_entrega()
     {
@@ -25,7 +30,6 @@ public sealed class DeliveryClaimTests(SqlServerFixture fixture)
         const int endpoints = 25;
         const int workers = 8;
 
-        // Backlog repartido entre destinos: ejercita el ROW_NUMBER por OutboundEndpointId.
         for (var i = 0; i < total; i++)
         {
             await fixture.InsertDeliveryAsync(
@@ -33,25 +37,33 @@ public sealed class DeliveryClaimTests(SqlServerFixture fixture)
                 nextAttemptAt: Now.AddMinutes(-1), expiresAt: Now.AddHours(1), createdAt: Now);
         }
 
-        // N workers reclaman a la vez hasta drenar la cola. Si el claim no fuese atómico,
-        // dos verían la misma fila y saldría repetida en esta bolsa.
         var claimed = new ConcurrentBag<long>();
         var leaseUntil = Now.AddSeconds(180);
 
+        // Cada worker recorre todos los destinos, como hará el supervisor al descubrirlos.
         async Task RunWorker(string workerId)
         {
-            while (true)
-            {
-                var batch = await fixture.Claimer.ClaimAsync(
-                    Now, leaseUntil, workerId, batchSize: 100, perEndpoint: 20, CancellationToken.None);
-                if (batch.Count == 0)
-                {
-                    break;
-                }
+            var pendientes = true;
 
-                foreach (var d in batch)
+            while (pendientes)
+            {
+                pendientes = false;
+
+                for (var endpointId = 1; endpointId <= endpoints; endpointId++)
                 {
-                    claimed.Add(d.Id);
+                    var batch = await fixture.Claimer.ClaimForEndpointAsync(
+                        endpointId, Now, leaseUntil, workerId, batchSize: 20, CancellationToken.None);
+
+                    if (batch.Count > 0)
+                    {
+                        pendientes = true;
+                    }
+
+                    foreach (var d in batch)
+                    {
+                        batch.ShouldAllBe(x => x.OutboundEndpointId == endpointId);
+                        claimed.Add(d.Id);
+                    }
                 }
             }
         }
@@ -64,12 +76,16 @@ public sealed class DeliveryClaimTests(SqlServerFixture fixture)
         (await fixture.CountByStatusAsync(DeliveryStatus.InFlight)).ShouldBe(total);
     }
 
+    /// <summary>
+    /// Lo que antes garantizaba el <c>ROW_NUMBER() PARTITION BY</c> y ahora da la estructura: el
+    /// destino con cinco entregas no espera detrás del que tiene cien, porque ni siquiera mira su
+    /// backlog.
+    /// </summary>
     [RequiresDockerFact]
-    public async Task El_claim_reparte_por_destino_y_no_deja_sin_servicio_a_los_pequeños()
+    public async Task Un_destino_con_mucho_backlog_no_estorba_al_que_tiene_poco()
     {
         await fixture.ResetDeliveriesAsync();
 
-        // Un destino saturado (1) y otro con poco trabajo (2).
         for (var i = 0; i < 100; i++)
         {
             await fixture.InsertDeliveryAsync(
@@ -82,11 +98,61 @@ public sealed class DeliveryClaimTests(SqlServerFixture fixture)
                 DeliveryStatus.Pending, 2, Now.AddMinutes(-1), Now.AddHours(1), createdAt: Now);
         }
 
-        var batch = await fixture.Claimer.ClaimAsync(
-            Now, Now.AddSeconds(180), "solo", batchSize: 100, perEndpoint: 20, CancellationToken.None);
+        var pequeno = await fixture.Claimer.ClaimForEndpointAsync(
+            endpointId: 2, Now, Now.AddSeconds(180), "solo", batchSize: 20, CancellationToken.None);
 
-        var porDestino = batch.GroupBy(d => d.OutboundEndpointId).ToDictionary(g => g.Key, g => g.Count());
-        porDestino[1].ShouldBe(20);   // el saturado queda capado al techo por destino
-        porDestino[2].ShouldBe(5);    // el pequeño entra entero, no se queda esperando
+        pequeno.Count.ShouldBe(5);
+        pequeno.ShouldAllBe(d => d.OutboundEndpointId == 2);
+
+        // Y las cien del saturado siguen intactas: nadie las ha tocado al reclamar las del pequeño.
+        (await fixture.CountByStatusAsync(DeliveryStatus.Pending)).ShouldBe(100);
+    }
+
+    [RequiresDockerFact]
+    public async Task El_claim_respeta_el_tamaño_de_lote_y_sirve_lo_mas_vencido_primero()
+    {
+        await fixture.ResetDeliveriesAsync();
+
+        // La más antigua primero: el claim ordena por NextAttemptAt.
+        var primera = await fixture.InsertDeliveryAsync(
+            DeliveryStatus.Pending, 7, Now.AddMinutes(-30), Now.AddHours(1), createdAt: Now);
+
+        for (var i = 0; i < 9; i++)
+        {
+            await fixture.InsertDeliveryAsync(
+                DeliveryStatus.Pending, 7, Now.AddMinutes(-1), Now.AddHours(1), createdAt: Now);
+        }
+
+        var batch = await fixture.Claimer.ClaimForEndpointAsync(
+            endpointId: 7, Now, Now.AddSeconds(180), "solo", batchSize: 4, CancellationToken.None);
+
+        batch.Count.ShouldBe(4);
+        batch.Select(d => d.Id).ShouldContain(primera);
+    }
+
+    [RequiresDockerFact]
+    public async Task El_descubrimiento_solo_devuelve_destinos_con_trabajo_vencido()
+    {
+        await fixture.ResetDeliveriesAsync();
+
+        // Vencida: toca ya.
+        await fixture.InsertDeliveryAsync(
+            DeliveryStatus.Pending, 10, Now.AddMinutes(-1), Now.AddHours(1), createdAt: Now);
+
+        // Programada para más tarde: todavía no.
+        await fixture.InsertDeliveryAsync(
+            DeliveryStatus.Retrying, 11, Now.AddMinutes(5), Now.AddHours(1), createdAt: Now);
+
+        // Fuera de ventana: ya no.
+        await fixture.InsertDeliveryAsync(
+            DeliveryStatus.Pending, 12, Now.AddMinutes(-1), Now.AddSeconds(-1), createdAt: Now);
+
+        // Ya entregada: nunca más.
+        await fixture.InsertDeliveryAsync(
+            DeliveryStatus.Delivered, 13, Now.AddMinutes(-1), Now.AddHours(1), createdAt: Now);
+
+        var conTrabajo = await fixture.Claimer.FindEndpointsWithWorkAsync(Now, CancellationToken.None);
+
+        conTrabajo.ShouldBe([10]);
     }
 }

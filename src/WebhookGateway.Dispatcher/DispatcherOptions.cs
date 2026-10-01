@@ -13,14 +13,37 @@ public sealed class DispatcherOptions
     /// </summary>
     public bool Enabled { get; set; } = true;
 
-    /// <summary>Entregas reclamadas por ciclo, sumando todos los destinos.</summary>
-    public int BatchSize { get; set; } = 100;
-
     /// <summary>
-    /// Techo por destino dentro de un mismo ciclo. Es lo que impide que un destino con
-    /// mucho backlog se lleve el lote entero y deje a los demás esperando.
+    /// Entregas que reclama un destino cada vez que pide trabajo. No es un techo de ritmo: el
+    /// destino vuelve a pedir en cuanto termina, así que esto solo decide el tamaño del viaje a
+    /// SQL. Que ningún destino acapare a los demás ya no depende de este número, sino de que cada
+    /// uno avance por su cuenta.
     /// </summary>
     public int MaxPerEndpointPerClaim { get; set; } = 20;
+
+    /// <summary>
+    /// Peticiones HTTP simultáneas en vuelo sumando todos los destinos.
+    /// </summary>
+    /// <remarks>
+    /// Antes el paralelismo real era <c>Environment.ProcessorCount</c> —ocho en este servidor—
+    /// porque <c>Parallel.ForEachAsync</c> lo usa por defecto, aunque el comentario del código
+    /// dijera "sin límite". Ocho entregas a la vez con destinos que tardan 300–400 ms son unas
+    /// 20–25 por segundo como mucho, y hacen falta 4,6 de media con picos muy por encima.
+    /// <para>
+    /// Entregar es esperar a la red, no calcular, así que el número correcto no tiene que ver con
+    /// los núcleos. Lo que de verdad limita es lo que cada destino aguanta, y de eso ya se encarga
+    /// su propio límite de ritmo y de concurrencia; esto es solo la red de seguridad para que mil
+    /// destinos a la vez no se traduzcan en mil conexiones.
+    /// </para>
+    /// </remarks>
+    public int MaxGlobalConcurrency { get; set; } = 128;
+
+    /// <summary>
+    /// Destinos avanzando a la vez. Lo que acota es el uso del pool de conexiones, no el ritmo: cada
+    /// destino en marcha abre una conexión para reclamar y otra para volcar resultados. Con el puñado
+    /// de destinos que hay hoy este techo no se llega a tocar.
+    /// </summary>
+    public int MaxEndpointsInParallel { get; set; } = 32;
 
     /// <summary>
     /// Cuánto dura la reclamación. Debe superar con holgura el tiempo de entrega más lento;

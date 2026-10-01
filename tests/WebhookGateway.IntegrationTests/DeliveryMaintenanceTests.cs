@@ -57,8 +57,8 @@ public sealed class DeliveryMaintenanceTests(SqlServerFixture fixture)
         (await fixture.ReadDeliveryAsync(vencida)).Status.ShouldBe((byte)DeliveryStatus.Expired);
 
         // Y una vez expirada, el claim no la toca: exige ExpiresAt > now.
-        var batch = await fixture.Claimer.ClaimAsync(
-            Now, Now.AddSeconds(180), "w", batchSize: 100, perEndpoint: 20, CancellationToken.None);
+        var batch = await fixture.Claimer.ClaimForEndpointAsync(
+            endpointId: 1, Now, Now.AddSeconds(180), "w", batchSize: 100, CancellationToken.None);
         batch.ShouldBeEmpty();
     }
 }

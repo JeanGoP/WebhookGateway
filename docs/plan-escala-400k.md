@@ -4,8 +4,16 @@ Documento de continuidad. Quien retome este trabajo (persona o Claude) debe leer
 `CLAUDE.md`, después este archivo, y solo entonces tocar código.
 
 Última actualización: 2026-10-01. **Fase 0 prácticamente cerrada. Fase 1 escrita, compilando y con
-el arreglo del procedimiento verificado contra `WebhookGateway_dev`; quedan sus tests de
-integración por ejecutar (no hay Docker en el equipo). Ver el final de la fase 1.**
+el arreglo del procedimiento verificado contra `WebhookGateway_dev`. Fase 2 escrita y compilando,
+pero el despachador nuevo no se ha visto funcionar: falta Docker para los tests de integración, y
+Control de aplicaciones de Windows está bloqueando ahora mismo la DLL de los unitarios. Ver el final
+de cada fase.**
+
+> **La verificación pendiente va a una máquina aparte.** En este equipo no hay Docker ni se va a
+> poner: hay otra máquina dedicada a eso, y ahí se pasará la suite de integración más adelante
+> (decidido el 2026-10-01). Hasta entonces, el claim por destino, el índice nuevo y el avance
+> independiente quedan escritos y compilando pero sin haberse visto funcionar. Esa máquina resuelve
+> además el bloqueo de Control de aplicaciones de Windows que impide ejecutar aquí los unitarios.
 
 ---
 
@@ -121,8 +129,8 @@ Desarrollo y producción comparten servidor. Esto **no se negocia**:
    el 2026-10-01). Antes de cualquier publicación a IIS debe volver a `Database=WebhookGateway`,
    o producción escribiría en la base de desarrollo.
 5. No encender el despachador en local mientras apunte a una base con entregas reales.
-6. **La prueba de carga no se hace en el servidor compartido.** Usar el SQL local de Docker
-   (`docker-compose.yml`) y destinos falsos locales.
+6. **La prueba de carga no se hace en el servidor compartido.** Va en la máquina dedicada a Docker,
+   con el SQL de `docker-compose.yml` y destinos falsos locales.
 7. Antes de cada despliegue: copia de seguridad completa y horario de poco tráfico.
 8. Jobs de purga: una semana en `@DryRun = 1` antes de activarlos.
 
@@ -194,30 +202,61 @@ Notas de esa prueba, para quien la repita:
   una transacción con `BEGIN TRANSACTION` de T-SQL entre lotes** (SQL Server la deshace y avisa).
   Hay que usar una transacción de cliente (`SqlConnection.BeginTransaction`).
 - La definición del SP que había antes quedó guardada antes de aplicar el cambio, por si hay que
-  volver atrás sin pasar por git (`db/10` todavía no está commiteado).
+  volver atrás sin pasar por git.
 
 **Lo que falta para cerrar la fase:** los **tests de integración siguen omitidos, no hay Docker en
 este equipo** — y eso incluye los que ya existían del claim concurrente, que CLAUDE.md marca como
 obligatorios. `tests/…/TrafficWriteInboundTests.cs` cubre la carrera de duplicados, las claves
-distintas que no se estorban y el caso sin clave. Con Docker Desktop instalado, `dotnet test` los
-ejecuta. Tampoco se comprobó que la versión *anterior* del SP falle ese mismo escenario: hacerlo
+distintas que no se estorban y el caso sin clave. Se ejecutarán en la máquina dedicada a Docker.
+Tampoco se comprobó que la versión *anterior* del SP falle ese mismo escenario: hacerlo
 exigiría reinstalar el procedimiento defectuoso en el servidor compartido, y eso no se hace; el
 test en contenedor lo demuestra sin tocar nada de nadie.
 
-### Fase 2 — Nuevo despachador (4–6 días)
+### Fase 2 — Nuevo despachador (4–6 días) · **escrita, pendiente de verificar**
 
-- [ ] Sustituir "lote de 100 + `Parallel.ForEachAsync` + esperar al más lento" por avance
-      independiente por destino: cada destino con su concurrencia y su limitador; un destino
-      lento o caído no frena a los demás.
-- [ ] Techo de concurrencia global configurable (p. ej. 128) en lugar de los núcleos.
-- [ ] Claim por destino, sin `ROW_NUMBER()` sobre todo el backlog en cada ciclo.
-- [ ] `DeliveryRecorder`: cada lote en una sola transacción (hoy cada `UPDATE` hace su propio
-      commit).
-- [ ] Corregir el redondeo de `EndpointThrottles`.
-- [ ] Respetar las reglas del despachador de `CLAUDE.md` (claim atómico con lease y
-      `READPAST`, reprogramar no consume intento, el breaker solo cuenta fallos transitorios…).
-- [ ] Tests: claim con N workers concurrentes (obligatorio según `CLAUDE.md`) y un destino lento
-      que no frene a los demás.
+- [x] Avance independiente por destino. `DispatcherWorker` ya no entrega nada: descubre qué
+      destinos tienen trabajo vencido y pone en marcha el de cada uno. Quien entrega es
+      `EndpointPump`, uno por destino, que reclama lo suyo y repite hasta vaciar su cola;
+      `EndpointPumpSet` lleva la cuenta de quién está avanzando. La espera del limitador salió de
+      `DeliveryDispatcher`: esperar ahí dentro era justo lo que bloqueaba a los demás.
+- [x] Techo global configurable: `Gateway:Dispatcher:MaxGlobalConcurrency`, 128 por defecto, en
+      lugar de los ocho núcleos que imponía `Parallel.ForEachAsync`. Se pide **después** del turno
+      del destino, para que esperar un ritmo no ocupe capacidad que otro podría usar. Hay un
+      segundo techo, `MaxEndpointsInParallel` (32), que no acota ritmo sino conexiones: cada bomba
+      en marcha usa una para reclamar y otra para volcar. Con los destinos que hay hoy no se toca.
+- [x] Claim por destino, sin `ROW_NUMBER()`: `ClaimForEndpointAsync` pide solo lo de un destino y
+      `FindEndpointsWithWorkAsync` responde quién tiene trabajo. Necesita el índice nuevo de
+      `db/11-delivery-dispatch-by-endpoint.sql` — (`OutboundEndpointId`, `NextAttemptAt`), filtrado
+      por `Status IN (0, 2)`— para que sea una búsqueda directa y no un recorrido de todo lo
+      vencido. El índice viejo `IX_Delivery_Dispatch` **no se borra**: mientras producción corra el
+      código anterior, es el que sostiene su claim.
+- [x] `DeliveryRecorder`: el volcado entero va en una transacción. Si falla, se propaga y esas
+      entregas vuelven por vencimiento de lease, que es lo que se quiere: guardarlas para
+      reintentar el volcado crece sin techo si el fallo no es pasajero.
+- [x] Redondeo del limitador: `RateBudget` elige el periodo para que la cuenta salga exacta y,
+      cuando no puede, redondea **a la baja**. Un destino a 90/min recibía 120/min.
+- [x] Reglas del despachador de `CLAUDE.md`: el claim sigue siendo atómico con lease y `READPAST`;
+      reprogramar sigue sin consumir intento; el breaker sigue contando solo fallos transitorios y
+      ahora además se comprueba **antes de reclamar**, así que un destino caído con mil pendientes
+      ya no son mil reclamaciones y mil reprogramaciones para no enviar nada.
+- [x] Test del claim con N workers concurrentes: reescrito para el claim por destino, que concentra
+      la contención (todos los workers peleando por las filas del mismo destino, el peor caso para
+      `READPAST`/`UPDLOCK`). Más el descubrimiento, el tamaño de lote y el orden por vencimiento.
+- [ ] **Falta el test del destino lento que no frena a los demás.** Es el único punto de la fase sin
+      cubrir. Necesita Docker y destinos HTTP falsos: dos destinos con backlog, uno que responde en
+      2 s y otro al instante, y comprobar que el rápido termina sin esperar al lento. Encaja con la
+      prueba de carga de la fase 6, que ya contempla ese escenario.
+
+**Cómo verificarlo todo.** `dotnet build` queda sin avisos. Los unitarios **no se pudieron
+ejecutar**: Control de aplicaciones de Windows (Smart App Control, `VerifiedAndReputablePolicyState
+= 1`) bloquea la DLL de test recién compilada con `0x800711C7`, en Debug y en Release. Antes de
+añadir `EndpointThrottlesTests` sí corrieron: 129 verdes y los 30 de `RateBudget`. Lo que queda sin
+pasar ni una vez es `EndpointThrottlesTests`. Y los de integración siguen omitidos por no haber
+Docker, que es también lo que impide probar el claim nuevo y el índice contra un motor real.
+
+Por tanto, **el despachador nuevo no se ha visto funcionar todavía**. Antes de darlo por bueno, o se
+pasa la suite en la máquina de Docker, o se arranca en local contra `WebhookGateway_dev` con destinos
+de prueba y se mira el log.
 
 ### Fase 3 — Datos y mantenimiento (2–3 días)
 
@@ -245,6 +284,9 @@ test en contenedor lo demuestra sin tocar nada de nadie.
 
 ### Fase 5 — Despliegue en IIS (1 día)
 
+- [ ] Una vez desplegado el despachador nuevo, borrar el índice `IX_Delivery_Dispatch`: lo usaba el
+      claim con `ROW_NUMBER()` y ya no lo usa nadie. Mientras producción corra el código anterior
+      tiene que seguir ahí, porque es el que sostiene su claim.
 - [ ] App pool con `AlwaysRunning`, sin tiempo de inactividad, reciclaje controlado.
 - [ ] Valorar el despachador como Servicio de Windows aparte
       (`Gateway:Dispatcher:Enabled = false` en la API).

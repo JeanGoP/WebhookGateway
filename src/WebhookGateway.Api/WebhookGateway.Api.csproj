@@ -7,6 +7,16 @@
     <UserSecretsId>webhookgateway-api</UserSecretsId>
   </PropertyGroup>
 
+  <!--
+		Smart App Control de Windows bloquea el .exe que genera el SDK, porque se
+		crea nuevo en cada build y no lleva firma reconocida. Sin apphost, la app
+		se ejecuta con dotnet.exe, que si esta firmado por Microsoft.
+		Solo en Debug: la publicacion a produccion sigue generando su .exe.
+	-->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <UseAppHost>false</UseAppHost>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\WebhookGateway.Core\WebhookGateway.Core.csproj" />
     <ProjectReference Include="..\WebhookGateway.Data\WebhookGateway.Data.csproj" />

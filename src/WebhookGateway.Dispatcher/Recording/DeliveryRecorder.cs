@@ -60,9 +60,20 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
     }
 
     /// <summary>
-    /// Vuelca lo acumulado en lotes reales de red. Las actualizaciones van primero: si el proceso muere entre las
-    /// dos escrituras, se pierde el registro de un intento pero no el estado de la entrega.
+    /// Vuelca lo acumulado en lotes reales de red, todo dentro de una transacción.
     /// </summary>
+    /// <remarks>
+    /// La transacción es lo que hace que el estado de las entregas y el registro de sus intentos no
+    /// puedan quedar descuadrados: antes cada <c>UPDATE</c> se confirmaba por su cuenta, así que una
+    /// caída a mitad dejaba unas entregas actualizadas y otras no, con sus intentos sin escribir.
+    /// <para>
+    /// Si el volcado falla, se propaga la excepción y estos resultados se pierden: las entregas
+    /// siguen reclamadas por este worker hasta que vence su lease, y entonces otro las recoge y las
+    /// vuelve a enviar. Es a propósito. La alternativa —guardarlas para reintentar el volcado— crece
+    /// sin techo si el fallo no es pasajero, y ante una caída de SQL es mejor entregar algo dos veces
+    /// que perderlo.
+    /// </para>
+    /// </remarks>
     public async Task<int> FlushAsync(CancellationToken cancellationToken)
     {
         AttemptRecord[] attempts;
@@ -82,21 +93,25 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
         }
 
         using var connection = await connectionFactory.OpenAsync(cancellationToken);
+        using var transaction = connection.BeginTransaction();
 
         if (updates.Length > 0)
         {
-            await UpdateDeliveriesBatchAsync(connection, updates, cancellationToken);
+            await UpdateDeliveriesBatchAsync(connection, transaction, updates, cancellationToken);
         }
 
         if (attempts.Length > 0)
         {
-            await InsertAttemptsBatchAsync(connection, attempts, cancellationToken);
+            await InsertAttemptsBatchAsync(connection, transaction, attempts, cancellationToken);
         }
+
+        transaction.Commit();
 
         return updates.Length;
     }
 
-    private static async Task UpdateDeliveriesBatchAsync(IDbConnection connection, DeliveryUpdate[] updates, CancellationToken ct)
+    private static async Task UpdateDeliveriesBatchAsync(
+        IDbConnection connection, IDbTransaction transaction, DeliveryUpdate[] updates, CancellationToken ct)
     {
         foreach (var chunk in updates.Chunk(50))
         {
@@ -124,11 +139,12 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
                 parameters.Add($"id{i}", item.Id);
             }
 
-            await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, transaction, cancellationToken: ct));
         }
     }
 
-    private static async Task InsertAttemptsBatchAsync(IDbConnection connection, AttemptRecord[] attempts, CancellationToken ct)
+    private static async Task InsertAttemptsBatchAsync(
+        IDbConnection connection, IDbTransaction transaction, AttemptRecord[] attempts, CancellationToken ct)
     {
         foreach (var chunk in attempts.Chunk(100))
         {
@@ -157,7 +173,7 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
             }
 
             sb.Append(';');
-            await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, transaction, cancellationToken: ct));
         }
     }
 

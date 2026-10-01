@@ -8,18 +8,31 @@ using WebhookGateway.Dispatcher.Recording;
 namespace WebhookGateway.Dispatcher;
 
 /// <summary>
-/// El bucle del despachador: reclama un lote, lo entrega en paralelo, vuelca los resultados
-/// y espera a que haya más trabajo.
+/// El supervisor: mira qué destinos tienen trabajo vencido y pone en marcha el de cada uno. No
+/// entrega nada él mismo.
 /// </summary>
+/// <remarks>
+/// Antes este bucle era el despachador entero: reclamaba cien entregas de todos los destinos
+/// mezclados, las enviaba en paralelo y esperaba a que acabara la más lenta. Ahora cada destino
+/// avanza en su propia bomba (<see cref="EndpointPump"/>) y lo único que hace este bucle es
+/// descubrir quién tiene trabajo, además del mantenimiento de leases y caducidades.
+/// </remarks>
 public sealed class DispatcherWorker(
     DeliveryClaimer claimer,
-    DeliveryDispatcher dispatcher,
+    EndpointPumpSet pumps,
     DeliveryRecorder recorder,
     IDeliveryQueue queue,
     TimeProvider clock,
     IOptions<DispatcherOptions> options,
     ILogger<DispatcherWorker> logger) : BackgroundService
 {
+    /// <summary>
+    /// Espera mínima entre dos pasadas de descubrimiento cuando la recepción avisa. Sin esto, un
+    /// pico de setenta mensajes por segundo serían setenta consultas de descubrimiento por segundo:
+    /// la señal se agrupa y una sola pasada ve todo lo que acaba de llegar.
+    /// </summary>
+    private static readonly TimeSpan SignalCoalescing = TimeSpan.FromMilliseconds(250);
+
     private readonly DispatcherOptions _options = options.Value;
     private readonly WorkSignal _signal = new(queue);
     private readonly CycleBackoff _backoff = new();
@@ -32,7 +45,9 @@ public sealed class DispatcherWorker(
             return;
         }
 
-        logger.LogInformation("Despachador {WorkerId} en marcha.", _options.WorkerId);
+        logger.LogInformation(
+            "Despachador {WorkerId} en marcha: hasta {Global} entregas en vuelo y {Endpoints} destinos a la vez.",
+            _options.WorkerId, _options.MaxGlobalConcurrency, _options.MaxEndpointsInParallel);
 
         _signal.StartListening(stoppingToken);
         var nextMaintenance = DateTimeOffset.MinValue;
@@ -56,12 +71,12 @@ public sealed class DispatcherWorker(
     }
 
     /// <summary>
-    /// Una pasada del bucle, con todo lo que pueda fallar contenido aquí dentro.
+    /// Una pasada del supervisor, con todo lo que pueda fallar contenido aquí dentro.
     ///
     /// Esto es lo que impide que una excepción escape de <c>ExecuteAsync</c>. El host trata un
-    /// <c>BackgroundService</c> que termina con fallo parando el proceso entero, y en este
-    /// proceso también vive la recepción: un timeout de SQL dejaría al gateway sin recibir
-    /// webhooks, no solo sin despacharlos. Mejor esperar y volver a intentarlo.
+    /// <c>BackgroundService</c> que termina con fallo parando el proceso entero, y en este proceso
+    /// también vive la recepción: un timeout de SQL dejaría al gateway sin recibir webhooks, no solo
+    /// sin despacharlos. Mejor esperar y volver a intentarlo.
     /// </summary>
     /// <returns>Cuándo toca la siguiente pasada de mantenimiento.</returns>
     private async Task<DateTimeOffset> RunIterationAsync(DateTimeOffset nextMaintenance, CancellationToken stoppingToken)
@@ -74,12 +89,16 @@ public sealed class DispatcherWorker(
                 nextMaintenance = clock.GetUtcNow().AddSeconds(_options.MaintenanceIntervalSeconds);
             }
 
-            var dispatched = await RunCycleAsync(stoppingToken);
+            await DiscoverAsync(stoppingToken);
             _backoff.Reset();
 
-            if (dispatched == 0)
+            // La espera es siempre, haya trabajo o no: las bombas ya están avanzando por su cuenta y
+            // lo único que hace falta es volver a mirar de vez en cuando.
+            var woken = await _signal.WaitAsync(TimeSpan.FromSeconds(_options.IdlePollSeconds), stoppingToken);
+
+            if (woken)
             {
-                await _signal.WaitAsync(TimeSpan.FromSeconds(_options.IdlePollSeconds), stoppingToken);
+                await Task.Delay(SignalCoalescing, clock, stoppingToken);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -104,49 +123,23 @@ public sealed class DispatcherWorker(
         return nextMaintenance;
     }
 
-    private async Task<int> RunCycleAsync(CancellationToken cancellationToken)
+    /// <summary>Pone en marcha una bomba por cada destino con trabajo vencido.</summary>
+    private async Task DiscoverAsync(CancellationToken cancellationToken)
     {
         var now = clock.GetUtcNow().UtcDateTime;
-        var leaseUntil = now.AddSeconds(_options.LeaseSeconds);
+        var endpoints = await claimer.FindEndpointsWithWorkAsync(now, cancellationToken);
 
-        var claimed = await claimer.ClaimAsync(
-            now, leaseUntil, _options.WorkerId, _options.BatchSize, _options.MaxPerEndpointPerClaim, cancellationToken);
-
-        if (claimed.Count == 0)
+        foreach (var endpointId in endpoints)
         {
-            return 0;
+            pumps.EnsureRunning(endpointId, cancellationToken);
         }
 
-        var messageIds = claimed.Select(d => d.MessageId);
-        var payloadsMap = await dispatcher.PreloadPayloadsAsync(messageIds, cancellationToken);
-
-        /*
-            Sin límite de paralelismo aquí a propósito: el freno real es el de cada destino,
-            en EndpointThrottles. Un lote de cien entregas repartidas entre veinte destinos
-            debe poder avanzar a la vez; lo que no puede es saturar a ninguno de ellos.
-        */
-        await Parallel.ForEachAsync(claimed, cancellationToken, async (delivery, token) =>
+        if (endpoints.Count > 0)
         {
-            try
-            {
-                payloadsMap.TryGetValue(delivery.MessageId, out var payload);
-                await dispatcher.DispatchAsync(delivery, payload, token);
-            }
-            catch (OperationCanceledException)
-            {
-                // El lease vencerá y otro worker la recogerá. No se pierde.
-            }
-#pragma warning disable CA1031 // Un fallo inesperado en una entrega no puede parar el bucle.
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Fallo inesperado despachando la entrega {DeliveryId}.", delivery.Id);
-            }
-#pragma warning restore CA1031
-        });
-
-        await recorder.FlushAsync(cancellationToken);
-
-        return claimed.Count;
+            logger.LogDebug(
+                "{Pending} destinos con trabajo pendiente, {Running} avanzando.",
+                endpoints.Count, pumps.RunningCount);
+        }
     }
 
     private async Task RunMaintenanceAsync(CancellationToken cancellationToken)
@@ -168,8 +161,9 @@ public sealed class DispatcherWorker(
     }
 
     /// <summary>
-    /// Apagado ordenado: volcar lo pendiente y soltar los leases que este worker aún tenga.
-    /// Sin esto, las entregas en vuelo al desplegar esperarían a que venciera su lease.
+    /// Apagado ordenado: esperar a que las bombas terminen lo que tienen en vuelo, volcar lo
+    /// pendiente y soltar los leases que este worker aún tenga. Sin esto, las entregas en vuelo al
+    /// desplegar esperarían a que venciera su lease.
     /// </summary>
     private async Task ShutDownAsync()
     {
@@ -177,6 +171,7 @@ public sealed class DispatcherWorker(
 
         try
         {
+            await pumps.WhenAllFinishedAsync();
             await recorder.FlushAsync(grace.Token);
 
             var released = await claimer.ReleaseAllAsync(_options.WorkerId, grace.Token);

@@ -19,7 +19,8 @@ public sealed class WorkSignal(IDeliveryQueue queue) : IDisposable
         _listener = ListenAsync(cancellationToken);
 
     /// <summary>Duerme hasta que llegue una señal o venza <paramref name="timeout"/>.</summary>
-    public Task WaitAsync(TimeSpan timeout, CancellationToken cancellationToken) =>
+    /// <returns><see langword="true"/> si despertó por una señal; <see langword="false"/> si venció el plazo.</returns>
+    public Task<bool> WaitAsync(TimeSpan timeout, CancellationToken cancellationToken) =>
         _wakeUp.WaitAsync(timeout, cancellationToken);
 
     /// <summary>Cierra la cola y espera a que el escuchador termine.</summary>

@@ -1,10 +1,8 @@
 using System.Diagnostics;
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using WebhookGateway.Core.Delivery;
 using WebhookGateway.Core.Domain;
-using WebhookGateway.Core.Notifications;
 using WebhookGateway.Data.Traffic;
 using WebhookGateway.Dispatcher.Claiming;
 using WebhookGateway.Dispatcher.Notifications;
@@ -15,21 +13,24 @@ using WebhookGateway.Dispatcher.Throttling;
 namespace WebhookGateway.Dispatcher;
 
 /// <summary>
-/// Entrega una reclamación: resuelve el destino, respeta su ritmo, envía y decide qué pasa
-/// después. Es donde se junta todo lo demás.
+/// Entrega una reclamación: envía y decide qué pasa después. Es donde se junta todo lo demás.
 /// </summary>
+/// <remarks>
+/// Lo que aquí <em>no</em> se hace es esperar turno en el limitador del destino. Esa espera la hace
+/// quien llama, antes de ocupar un hueco de capacidad global, y por una razón concreta: cuando se
+/// esperaba aquí dentro, una entrega a un destino limitado a 60/min se quedaba quieta quince
+/// segundos ocupando uno de los pocos huecos de paralelismo, y los destinos sanos no avanzaban. El
+/// contrato de <see cref="DispatchAsync"/> es que el turno ya está concedido.
+/// </remarks>
 public sealed class DeliveryDispatcher(
-    OutboundTargetCache targets,
     MessagePayloadReader payloads,
     DeliverySender sender,
-    EndpointThrottles throttles,
     EndpointBreakers breakers,
     DeliveryRecorder recorder,
-    NotificationStore notifications,
     EndpointHealthTracker healthTracker,
+    DeadLetterAlerts deadLetters,
     TimeProvider clock,
     IOptions<DispatcherOptions> options,
-    IOptions<NotificationOptions> notificationOptions,
     ILogger<DeliveryDispatcher> logger)
 {
     private readonly string _workerId = options.Value.WorkerId;
@@ -37,23 +38,22 @@ public sealed class DeliveryDispatcher(
     public Task<Dictionary<long, OutgoingPayload>> PreloadPayloadsAsync(IEnumerable<long> messageIds, CancellationToken ct) =>
         payloads.LoadBatchAsync(messageIds, ct);
 
-    public Task DispatchAsync(ClaimedDelivery delivery, CancellationToken cancellationToken) =>
-        DispatchAsync(delivery, null, cancellationToken);
-
-    public async Task DispatchAsync(ClaimedDelivery delivery, OutgoingPayload? payload, CancellationToken cancellationToken)
+    /// <summary>
+    /// Envía una entrega a su destino. Quien llama ya resolvió el destino y ya tiene su turno.
+    /// </summary>
+    public async Task DispatchAsync(
+        ClaimedDelivery delivery, OutboundTarget target, OutgoingPayload? payload, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(delivery);
+        ArgumentNullException.ThrowIfNull(target);
 
         var now = clock.GetUtcNow().UtcDateTime;
-        var target = await targets.GetAsync(delivery.OutboundEndpointId, cancellationToken);
 
-        if (target is null)
-        {
-            Terminate(delivery, DeliveryStatus.Failed, now, "El destino ya no existe o está desactivado.");
-            return;
-        }
-
-        // Circuito abierto: el destino está caído y no vamos a gastar un intento confirmándolo.
+        /*
+            El circuito se comprueba también aquí, no solo antes de reclamar: puede abrirse a mitad
+            de un lote, con los fallos que acaba de dar este mismo destino. Entonces lo que queda
+            del lote se reprograma en vez de seguir insistiendo.
+        */
         if (breakers.OpenUntil(target.Id) is { } openUntil)
         {
             Reschedule(delivery, openUntil.UtcDateTime, "El circuito del destino está abierto.");
@@ -65,16 +65,6 @@ public sealed class DeliveryDispatcher(
         if (payload is null)
         {
             Terminate(delivery, DeliveryStatus.Failed, now, "El cuerpo del mensaje ya no está disponible: se purgó antes de entregarlo.");
-            return;
-        }
-
-        using var lease = await throttles.AcquireAsync(target, cancellationToken);
-
-        if (!lease.IsAcquired)
-        {
-            // Hay más entregas esperando de las que este destino puede absorber. Vuelve a la
-            // cola en breve en vez de quedarse ocupando un hilo.
-            Reschedule(delivery, now.AddSeconds(5), null);
             return;
         }
 
@@ -97,11 +87,12 @@ public sealed class DeliveryDispatcher(
         var update = Decide(delivery, target, result, verdict, attemptNumber);
         recorder.Add(attempt, update);
 
-        if ((update.Status == (byte)DeliveryStatus.Failed || update.Status == (byte)DeliveryStatus.Expired)
-            && notificationOptions.Value.Enabled
-            && !string.IsNullOrWhiteSpace(notificationOptions.Value.AdminEmail))
+        var descartada = update.Status == (byte)DeliveryStatus.Failed
+                      || update.Status == (byte)DeliveryStatus.Expired;
+
+        if (descartada && deadLetters.Enabled)
         {
-            await EnqueueDeadLetterNotificationAsync(delivery, target, result, attemptNumber, cancellationToken);
+            await deadLetters.RaiseAsync(delivery, target, result, attemptNumber, cancellationToken);
         }
     }
 
@@ -143,6 +134,22 @@ public sealed class DeliveryDispatcher(
         return Update(delivery, DeliveryStatus.Retrying, attemptNumber, now + delay.Value, result.StatusCode, lastError, null);
     }
 
+    /// <summary>
+    /// El destino ya no existe o lo desactivaron: la entrega no se reintenta, porque no hay a dónde
+    /// mandarla.
+    /// </summary>
+    public void TerminateMissingTarget(ClaimedDelivery delivery) =>
+        Terminate(delivery, DeliveryStatus.Failed, clock.GetUtcNow().UtcDateTime,
+            "El destino ya no existe o está desactivado.");
+
+    /// <summary>
+    /// El destino tiene más entregas esperando de las que su limitador puede absorber. Vuelve a la
+    /// cola en breve sin consumir intento: no la hemos enviado.
+    /// </summary>
+    public void RescheduleWithoutTurn(ClaimedDelivery delivery) =>
+        Reschedule(delivery, clock.GetUtcNow().UtcDateTime.AddSeconds(5),
+            "El destino no tenía turno libre en su limitador de ritmo.");
+
     /// <summary>Cierra la entrega sin haber llegado a hacer una petición, así que no hay intento que registrar.</summary>
     private void Terminate(ClaimedDelivery delivery, DeliveryStatus status, DateTime now, string reason)
     {
@@ -160,38 +167,4 @@ public sealed class DeliveryDispatcher(
         DateTime nextAttemptAt, int? statusCode, string? lastError, DateTime? completedAt) =>
         new(delivery.Id, delivery.CreatedAt, (byte)status, attemptCount, nextAttemptAt, (short?)statusCode, lastError, completedAt);
 
-    private async Task EnqueueDeadLetterNotificationAsync(
-        ClaimedDelivery delivery,
-        OutboundTarget target,
-        SendResult result,
-        short attemptNumber,
-        CancellationToken cancellationToken)
-    {
-        var subject = $"[ALERTA] Entrega descartada: {target.IntegrationName} / {target.EndpointName}";
-        var details = new IncidentDetails(
-            IntegrationName: target.IntegrationName,
-            EndpointName: target.EndpointName,
-            TargetUrl: target.TargetUrl.ToString(),
-            StatusCode: (short?)result.StatusCode,
-            ErrorSummary: result.ErrorMessage ?? "Intentos de entrega agotados sin éxito.",
-            AttemptCount: attemptNumber,
-            OccurredAtUtc: clock.GetUtcNow().UtcDateTime,
-            DashboardUrl: $"{notificationOptions.Value.DashboardBaseUrl}/deliveries/{delivery.Id}");
-
-        var metadataJson = JsonSerializer.Serialize(details);
-
-        var subscribers = await notifications.GetVerifiedSubscriberEmailsAsync(target.IntegrationId, cancellationToken);
-        var recipients = new HashSet<string>(subscribers, StringComparer.OrdinalIgnoreCase);
-        if (!string.IsNullOrWhiteSpace(notificationOptions.Value.AdminEmail))
-        {
-            recipients.Add(notificationOptions.Value.AdminEmail);
-        }
-
-        foreach (var recipient in recipients)
-        {
-            await notifications.EnqueueAsync(
-                NotificationChannel.Email, recipient, target.IntegrationId, target.Id,
-                delivery.Id, NotificationAlertType.DeadLetter, subject, metadataJson, cancellationToken);
-        }
-    }
 }

@@ -72,12 +72,18 @@ public static class DependencyInjection
         services.AddSingleton<EndpointBreakers>();
         services.AddSingleton<DeliveryDispatcher>();
 
+        // Una bomba por destino: el tipo es sin estado y la colección es la que lleva la cuenta de
+        // quién está avanzando y cuánta capacidad queda.
+        services.AddSingleton<EndpointPump>();
+        services.AddSingleton<EndpointPumpSet>();
+
         services.AddOptions<NotificationOptions>()
             .Bind(configuration.GetSection(NotificationOptions.SectionName));
 
         services.AddSingleton<NotificationStore>();
         services.AddSingleton<SmtpNotificationSender>();
         services.AddSingleton<EndpointHealthTracker>();
+        services.AddSingleton<DeadLetterAlerts>();
 
         services.AddHostedService<DispatcherWorker>();
         services.AddHostedService<NotificationWorker>();
