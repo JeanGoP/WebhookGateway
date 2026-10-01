@@ -3,10 +3,10 @@
 Documento de continuidad. Quien retome este trabajo (persona o Claude) debe leer primero
 `CLAUDE.md`, después este archivo, y solo entonces tocar código.
 
-Última actualización: 2026-10-01. **Fases 1, 2 y 3 escritas. `dotnet build` sin avisos y los 176
-unitarios en verde. El SQL de las tres fases está verificado contra `WebhookGateway_dev`. Lo que no
-se ha visto funcionar es el despachador nuevo entero: eso necesita la suite de integración, que pide
-Docker. Ver el final de cada fase.**
+Última actualización: 2026-10-01. **Fases 1, 2, 3 y 4 escritas. `dotnet build` sin avisos y los
+184 unitarios en verde. El SQL de las cuatro fases está verificado contra `WebhookGateway_dev`. Lo
+que no se ha visto funcionar es el despachador nuevo entero: eso necesita la suite de integración,
+que pide Docker. Ver el final de cada fase.**
 
 > **La verificación con Docker va a una máquina aparte.** En este equipo no hay Docker ni se va a
 > poner: hay otra máquina dedicada a eso, y ahí se pasará la suite de integración más adelante
@@ -343,11 +343,65 @@ el semáforo se desechaba de inmediato. Como el `using` del despachador cae dent
 síntoma no era una caída sino un error en el log por cada entrega en vuelo en ese momento. Lo
 encontró `EndpointThrottlesTests`.
 
-### Fase 4 — Alertas y panel (2 días)
+### Fase 4 — Alertas y panel (2 días) · **escrita y verificada en `_dev`**
 
-- [ ] Agrupar alertas: una por destino cada X minutos.
-- [ ] `live-status`: conteos limitados a las últimas 24 h y corregir la columna de duplicados.
-- [ ] Buscador de mensajes con `OPTION (RECOMPILE)`.
+- [x] Alertas agrupadas: una por destino cada `Gateway:Notifications:DeadLetterGroupingMinutes`
+      minutos (15 por defecto, 0 desactiva). El que spameaba era el aviso de **entrega descartada**,
+      que salía por cada entrega fallida y a cada destinatario: un destino que responde 400 a todo
+      descarta una entrega por mensaje, así que un pico de 2.000 eran miles de correos. Dentro de la
+      ventana no se calla y punto, se **cuenta**, y el siguiente aviso dice "y N más desde el último
+      aviso", que es la cifra que da el tamaño del problema. La ventana la lleva `DeadLetterWindows`
+      en memoria del proceso: con dos instancias vivas pueden salir dos avisos en vez de uno, y dos
+      en lugar de miles es exactamente el objetivo. Cubierto por `DeadLetterWindowsTests`, incluido
+      el caso concurrente: de 200 descartes simultáneos del mismo destino, exactamente uno avisa.
+
+      Las alertas de **salud** del destino ya estaban agrupadas de antes: `EndpointHealthTracker`
+      solo dispara en las transiciones de estado (Healthy → Degraded → Down → Recovered), así que un
+      destino caído da un correo, no mil. No hacía falta tocarlas.
+
+- [x] `live-status`: los conteos por estado iban **sin filtro de fecha**, contando todo el histórico
+      de `WebhookDelivery` en cada sondeo, y el panel puede sondear cada segundo. Con quince millones
+      de filas al año, eso es un recorrido completo por segundo.
+
+      Y no se arreglaba con un filtro plano de 24 h: la ventana de entrega por defecto son 72 horas,
+      así que una entrega legítimamente pendiente puede tener tres días, y con un corte de 24 h un
+      destino caído desde anteayer habría mostrado **la cola vacía** — justo lo contrario de lo que un
+      monitor tiene que decir. Así que va en dos consultas: la cola activa (0, 1, 2) completa, que sale
+      de índices filtrados por estado y solo contiene lo pendiente; y lo terminal (3 a 6), que es lo
+      que crece para siempre, acotado a 24 h. El DTO lleva ahora `TerminalWindowHours` para que el
+      panel pueda etiquetarlo. El feed de entregas recientes también se acotó: sin fecha, una
+      integración sin entregas recorría la tabla entera hacia atrás buscando diez filas inexistentes.
+
+- [x] La columna de duplicados contaba `Status = 2`, que es `NoSubscriptions`; `Duplicate` es 1. El
+      panel llamaba "duplicado" a un mensaje que había llegado bien pero no tenía ninguna suscripción
+      activa que lo reclamara: dos problemas opuestos —un emisor que reenvía frente a una
+      configuración a medias— mostrados como el mismo. Ahora son dos columnas,
+      `DuplicateMessages` y `NoSubscriptionMessages`.
+
+- [x] Buscador de mensajes con `OPTION (RECOMPILE)`. Los filtros opcionales van con el patrón
+      `@X IS NULL OR columna = @X`, y sin RECOMPILE el motor cachea el plan del primer juego de
+      parámetros que le toque y lo reutiliza para todos: el plan de "los últimos 50 de todo" no sirve
+      para "los del endpoint 7 del martes pasado". Con RECOMPILE planifica con los valores en la mano
+      y descarta los predicados que no aplican, de modo que puede usar `IX_WebhookMessage_Search`.
+      El coste es compilar en cada búsqueda, que la lanza una persona mirando una pantalla.
+
+- [x] Panel (`frontend/`, fuera de este repo de git): `types.ts` con los dos campos nuevos, y en
+      `monitor.tsx` las tarjetas terminales dicen la ventana (`· 24 h`) y hay una tarjeta nueva, "Sin
+      suscripción", separada de "Duplicados". `npx tsc --noEmit` limpio. **No se ha mirado en el
+      navegador**: haría falta levantar la API y entrar al panel, y el cambio son etiquetas, una
+      tarjeta y una clase de rejilla.
+
+**Verificado contra `WebhookGateway_dev` (2026-10-01).** Las dos consultas son de solo lectura; los
+datos de prueba se sembraron dentro de una transacción que luego se deshizo (quedaron 0 filas).
+
+- Cola activa: con 2 pendientes —una de ellas **de hace tres días**— y 1 reintentando, devuelve
+  `Pending = 2` y `Retrying = 1`. La vieja cuenta, que es el punto de todo el diseño.
+- Terminales: de 2 entregadas, una reciente y una de hace tres días, cuenta 1. La vieja no.
+- Tráfico: con 2 duplicados y 3 sin suscripción sembrados, devuelve exactamente eso, cada uno en su
+  columna.
+- Buscador: sin filtros devuelve la página completa; filtrando por `Status = 1` devuelve las 2
+  duplicadas y nada más; por endpoint y rango de fechas, las 6 del endpoint; y la página siguiente con
+  `AfterId` no repite ninguna.
 
 ### Fase 5 — Despliegue en IIS (1 día)
 

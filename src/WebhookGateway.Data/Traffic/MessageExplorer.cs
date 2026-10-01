@@ -10,6 +10,21 @@ namespace WebhookGateway.Data.Traffic;
 /// </summary>
 public sealed class MessageExplorer(ISqlConnectionFactory connectionFactory)
 {
+    /*
+        Consulta con filtros opcionales, el patrón «@X IS NULL OR columna = @X».
+
+        Necesita OPTION (RECOMPILE), y no es un adorno: sin él, SQL Server guarda en caché el plan que
+        construyó para el PRIMER juego de parámetros que le toque y lo reutiliza para todos los demás.
+        El plan de "dame los últimos 50 de todas las integraciones" no sirve para "los del endpoint 7
+        del martes pasado", y el buscador es la mitad del valor del producto: el que se abre cuando
+        algo fue mal y hay que encontrar un mensaje entre millones.
+
+        Con RECOMPILE, el motor planifica con los valores reales en la mano y además descarta los
+        predicados que no aplican en esta llamada, de modo que puede usar IX_WebhookMessage_Search
+        —(InboundEndpointId, ReceivedAt DESC)— cuando se filtra por endpoint. El coste es compilar en
+        cada búsqueda: microsegundos de CPU para una consulta que la lanza una persona mirando una
+        pantalla, no el camino caliente.
+    */
     private const string SearchMessagesSql = """
         SELECT TOP (@PageSize)
             m.Id, m.ReceivedAt, m.InboundEndpointId, m.SourceIp,
@@ -24,7 +39,8 @@ public sealed class MessageExplorer(ISqlConnectionFactory connectionFactory)
           AND (@From IS NULL OR m.ReceivedAt >= @From)
           AND (@To IS NULL OR m.ReceivedAt < @To)
           AND (@AfterId IS NULL OR m.Id < @AfterId)
-        ORDER BY m.ReceivedAt DESC, m.Id DESC;
+        ORDER BY m.ReceivedAt DESC, m.Id DESC
+        OPTION (RECOMPILE);
         """;
 
     private const string GetMessageSql = """

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using WebhookGateway.Core.Notifications;
 using WebhookGateway.Dispatcher.Claiming;
@@ -16,8 +17,10 @@ namespace WebhookGateway.Dispatcher.Notifications;
 /// </remarks>
 public sealed class DeadLetterAlerts(
     NotificationStore notifications,
+    DeadLetterWindows windows,
     TimeProvider clock,
-    IOptions<NotificationOptions> options)
+    IOptions<NotificationOptions> options,
+    ILogger<DeadLetterAlerts> logger)
 {
     /// <summary>Si no hay a quién avisar, no se construye el aviso.</summary>
     public bool Enabled =>
@@ -34,14 +37,43 @@ public sealed class DeadLetterAlerts(
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(result);
 
-        var subject = $"[ALERTA] Entrega descartada: {target.IntegrationName} / {target.EndpointName}";
+        /*
+            Un aviso por destino cada X minutos. Un destino que responde 400 a todo descarta una
+            entrega por mensaje, y sin esto cada una era un correo a cada destinatario: con 2.000
+            mensajes en un pico, miles de correos que nadie lee y que además ahogan los avisos de los
+            destinos que sí importan.
+        */
+        var calladas = windows.TryClaimAlert(
+            target.Id, TimeSpan.FromMinutes(options.Value.DeadLetterGroupingMinutes));
+
+        if (calladas is null)
+        {
+            logger.LogDebug(
+                "Entrega {DeliveryId} descartada en el destino {EndpointId}: no se avisa, ya se avisó hace poco.",
+                delivery.Id, target.Id);
+            return;
+        }
+
+        // El aviso dice cuántas más hubo mientras callaba, que es lo que de verdad hace falta saber.
+        var sufijo = calladas > 0
+            ? $" (y {calladas.Value} más desde el último aviso)"
+            : string.Empty;
+
+        var subject = $"[ALERTA] Entrega descartada{sufijo}: {target.IntegrationName} / {target.EndpointName}";
+
+        var motivo = result.ErrorMessage ?? "Intentos de entrega agotados sin éxito.";
+
+        if (calladas > 0)
+        {
+            motivo += $" Otras {calladas.Value} entregas de este destino se descartaron desde el aviso anterior.";
+        }
 
         var details = new IncidentDetails(
             IntegrationName: target.IntegrationName,
             EndpointName: target.EndpointName,
             TargetUrl: target.TargetUrl.ToString(),
             StatusCode: (short?)result.StatusCode,
-            ErrorSummary: result.ErrorMessage ?? "Intentos de entrega agotados sin éxito.",
+            ErrorSummary: motivo,
             AttemptCount: attemptNumber,
             OccurredAtUtc: clock.GetUtcNow().UtcDateTime,
             DashboardUrl: $"{options.Value.DashboardBaseUrl}/deliveries/{delivery.Id}");

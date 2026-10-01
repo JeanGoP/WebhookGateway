@@ -22,6 +22,21 @@ public sealed class NotificationOptions
 
     /// <summary>Ajustes del worker que drena la NotificationOutbox.</summary>
     public NotificationDrainerOptions Drainer { get; set; } = new();
+
+    /// <summary>
+    /// Minutos entre dos avisos de entrega descartada del mismo destino.
+    /// </summary>
+    /// <remarks>
+    /// Sin esto, un destino que responde 400 a todo genera un correo por cada entrega descartada y
+    /// por cada destinatario: miles. Dentro de la ventana no se calla y punto, se cuenta, y el
+    /// siguiente aviso dice cuántas más hubo. Poner 0 desactiva la agrupación, que es lo que hacía
+    /// antes.
+    /// <para>
+    /// La ventana se lleva en memoria del proceso. Durante un despliegue hay dos instancias vivas y
+    /// pueden salir dos avisos en vez de uno; dos en lugar de miles es exactamente el objetivo.
+    /// </para>
+    /// </remarks>
+    public int DeadLetterGroupingMinutes { get; set; } = 15;
 }
 
 /// <summary>Parámetros del servidor SMTP.</summary>

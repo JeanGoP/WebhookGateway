@@ -83,6 +83,7 @@ public static class DependencyInjection
         services.AddSingleton<NotificationStore>();
         services.AddSingleton<SmtpNotificationSender>();
         services.AddSingleton<EndpointHealthTracker>();
+        services.AddSingleton<DeadLetterWindows>();
         services.AddSingleton<DeadLetterAlerts>();
 
         services.AddHostedService<DispatcherWorker>();
