@@ -59,10 +59,22 @@ public sealed class DeliverySender(
                 await provider.InvalidateAsync(target.Id, cancellationToken);
             }
 
+            /*
+                La respuesta del destino solo se guarda cuando el intento salió mal, que es cuando
+                alguien va a leerla. Un 200 con su cuerpo y sus cabeceras son unos cientos de bytes
+                por entrega que nadie consulta nunca: a 400.000 entregas al día, casi todas buenas,
+                eso es la mayor parte de lo que ocupa DeliveryAttempt, la tabla de más volumen.
+
+                Y en el caso bueno ni se lee: el manejador se encarga de drenar lo que quede del
+                cuerpo al liberar la respuesta, así que no leerlo no cuesta la reutilización de la
+                conexión.
+            */
+            var fallo = AttemptClassifier.Classify((int)response.StatusCode) != AttemptVerdict.Success;
+
             return new SendResult(
                 (int)response.StatusCode,
-                SerializeHeaders(response),
-                await ReadBoundedAsync(response, timeout.Token),
+                fallo ? SerializeHeaders(response) : null,
+                fallo ? await ReadBoundedAsync(response, timeout.Token) : null,
                 null,
                 AttemptClassifier.ParseRetryAfter(HeaderValue(response, "Retry-After"), clock.GetUtcNow()));
         }

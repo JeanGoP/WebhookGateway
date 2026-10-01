@@ -108,14 +108,35 @@ public sealed class EndpointThrottlesTests
         var antes = await throttles.AcquireAsync(Target(maxConcurrency: 1), CancellationToken.None);
         antes.IsAcquired.ShouldBeTrue();
 
-        // Mismo destino, otra concurrencia: el freno se reemplaza, así que hay hueco otra vez
-        // aunque el turno anterior siga sin liberarse.
+        // Mismo destino, otro ritmo: el freno se reemplaza, así que hay hueco otra vez aunque el
+        // turno anterior siga sin liberarse.
         using var despues = await throttles.AcquireAsync(
             Target(maxConcurrency: 1, ratePerMinute: 120), CancellationToken.None);
 
         despues.IsAcquired.ShouldBeTrue();
 
         antes.Dispose();
+    }
+
+    /// <summary>
+    /// La entrega que estaba en vuelo cuando se cambió la configuración tiene que poder liberar su
+    /// turno sin más. Antes no: el freno viejo se desechaba con su semáforo, y liberar ese turno
+    /// lanzaba <see cref="ObjectDisposedException"/>. Como el <c>using</c> del despachador cae
+    /// dentro de su try/catch, el síntoma era un error en el log por cada entrega en vuelo cada vez
+    /// que alguien tocaba el ritmo de un destino en el panel.
+    /// </summary>
+    [Fact]
+    public async Task Liberar_un_turno_de_un_freno_ya_reemplazado_no_revienta()
+    {
+        using var throttles = new EndpointThrottles();
+
+        var enVuelo = await throttles.AcquireAsync(Target(ratePerMinute: 600), CancellationToken.None);
+        enVuelo.IsAcquired.ShouldBeTrue();
+
+        // Alguien cambia el destino en el panel mientras esa entrega sigue en vuelo.
+        using var nuevo = await throttles.AcquireAsync(Target(ratePerMinute: 90), CancellationToken.None);
+
+        Should.NotThrow(() => enVuelo.Dispose());
     }
 
     /// <summary>

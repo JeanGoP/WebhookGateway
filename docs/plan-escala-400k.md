@@ -3,17 +3,22 @@
 Documento de continuidad. Quien retome este trabajo (persona o Claude) debe leer primero
 `CLAUDE.md`, después este archivo, y solo entonces tocar código.
 
-Última actualización: 2026-10-01. **Fase 0 prácticamente cerrada. Fase 1 escrita, compilando y con
-el arreglo del procedimiento verificado contra `WebhookGateway_dev`. Fase 2 escrita y compilando,
-pero el despachador nuevo no se ha visto funcionar: falta Docker para los tests de integración, y
-Control de aplicaciones de Windows está bloqueando ahora mismo la DLL de los unitarios. Ver el final
-de cada fase.**
+Última actualización: 2026-10-01. **Fases 1, 2 y 3 escritas. `dotnet build` sin avisos y los 176
+unitarios en verde. El SQL de las tres fases está verificado contra `WebhookGateway_dev`. Lo que no
+se ha visto funcionar es el despachador nuevo entero: eso necesita la suite de integración, que pide
+Docker. Ver el final de cada fase.**
 
-> **La verificación pendiente va a una máquina aparte.** En este equipo no hay Docker ni se va a
+> **La verificación con Docker va a una máquina aparte.** En este equipo no hay Docker ni se va a
 > poner: hay otra máquina dedicada a eso, y ahí se pasará la suite de integración más adelante
-> (decidido el 2026-10-01). Hasta entonces, el claim por destino, el índice nuevo y el avance
-> independiente quedan escritos y compilando pero sin haberse visto funcionar. Esa máquina resuelve
-> además el bloqueo de Control de aplicaciones de Windows que impide ejecutar aquí los unitarios.
+> (decidido el 2026-10-01). Hasta entonces, el avance independiente por destino y el techo de
+> capacidad quedan escritos y compilando pero sin haberse visto funcionar en conjunto.
+
+> **Control de aplicaciones de Windows (Smart App Control) va y viene en este equipo.** Bloquea la
+> DLL de pruebas recién compilada con `FileLoadException 0x800711C7` y entonces `dotnet test` dice
+> "No hay ninguna prueba disponible". Es del equipo, no del código: `dotnet build` sigue limpio.
+> Cuando pasa, ni limpiar `bin/`+`obj/`, ni renombrar el ensamblado, ni compilar en Release lo
+> resuelven; se quita solo al cabo de un rato o de unas compilaciones. **Si `dotnet test` informa de
+> 0 pruebas o de un "Catastrophic failure", mira esto antes de buscar un bug que no existe.**
 
 ---
 
@@ -165,7 +170,7 @@ Desarrollo y producción comparten servidor. Esto **no se negocia**:
 
 Esfuerzo total: 13–19 días laborables (3–4 semanas) con una persona y en secuencia.
 
-### Fase 1 — Estabilidad (1–2 días) · **escrita, pendiente de verificar**
+### Fase 1 — Estabilidad (1–2 días) · **escrita, unitarios en verde, integración pendiente**
 
 - [x] `DispatcherWorker`: cada pasada del bucle va en `RunIterationAsync`, con su try/catch. Un
       fallo registra y espera según `CycleBackoff` (1 s → 5 s → 15 s → 30 s → 1 min, con jitter)
@@ -212,7 +217,7 @@ Tampoco se comprobó que la versión *anterior* del SP falle ese mismo escenario
 exigiría reinstalar el procedimiento defectuoso en el servidor compartido, y eso no se hace; el
 test en contenedor lo demuestra sin tocar nada de nadie.
 
-### Fase 2 — Nuevo despachador (4–6 días) · **escrita, pendiente de verificar**
+### Fase 2 — Nuevo despachador (4–6 días) · **escrita, unitarios en verde, integración pendiente**
 
 - [x] Avance independiente por destino. `DispatcherWorker` ya no entrega nada: descubre qué
       destinos tienen trabajo vencido y pone en marcha el de cada uno. Quien entrega es
@@ -266,34 +271,77 @@ entregas dentro de una transacción que luego se deshizo (quedaron 0 filas de pr
 Lo que esto **no** prueba: que las bombas por destino avancen de verdad en paralelo, ni el techo de
 capacidad, ni que un destino lento no frene a los demás. Eso necesita la suite de integración.
 
-**Cómo verificar el resto.** `dotnet build` queda sin avisos. Los unitarios **no se pudieron
-ejecutar**: Control de aplicaciones de Windows (Smart App Control, `VerifiedAndReputablePolicyState
-= 1`) bloquea la DLL de test recién compilada con `0x800711C7`, en Debug y en Release. Antes de
-añadir `EndpointThrottlesTests` sí corrieron: 129 verdes y los 30 de `RateBudget`. Lo que queda sin
-pasar ni una vez es `EndpointThrottlesTests`. Y los de integración siguen omitidos por no haber
-Docker, que es también lo que impide probar el claim nuevo y el índice contra un motor real.
+**Cómo verificar el resto.** `dotnet build` sin avisos y los 176 unitarios en verde, incluidos
+`RateBudgetTests` y `EndpointThrottlesTests`. Los 10 de integración siguen **omitidos** por no haber
+Docker: son los que probarían el claim nuevo bajo concurrencia contra un motor real.
 
-Por tanto, **el despachador nuevo no se ha visto funcionar todavía**. Antes de darlo por bueno, o se
-pasa la suite en la máquina de Docker, o se arranca en local contra `WebhookGateway_dev` con destinos
-de prueba y se mira el log.
+Por tanto, **el despachador nuevo no se ha visto funcionar en conjunto todavía**. Antes de darlo por
+bueno, o se pasa la suite en la máquina de Docker, o se arranca en local contra `WebhookGateway_dev`
+con destinos de prueba y se mira el log.
 
-### Fase 3 — Datos y mantenimiento (2–3 días)
+### Fase 3 — Datos y mantenimiento (2–3 días) · **escrita y verificada en `_dev`, jobs sin crear**
 
-- [ ] Guardar cabeceras y cuerpo de la respuesta solo en intentos fallidos
-      (`DeliverySender` / `DeliveryRecorder`).
-- [ ] Añadir purga de `NotificationLog` y `AuditLog` (no están particionadas ni se purgan).
-- [ ] Crear los jobs de SQL Agent:
+- [x] La respuesta del destino solo se guarda en intentos fallidos (`DeliverySender`). En el caso
+      bueno ni se lee el cuerpo: el manejador drena lo que quede al liberar la respuesta, así que no
+      cuesta la reutilización de la conexión. A 400.000 entregas al día, casi todas buenas, el cuerpo
+      y las cabeceras de los 200 eran la mayor parte de lo que ocupaba `DeliveryAttempt`, la tabla de
+      más volumen, y nadie los leía nunca. Cubierto por `DeliverySenderTests`.
+- [x] Purga de las tablas sin particionar, en `sp_Gateway_PurgeUnpartitionedLogs`
+      (`db/12-purge-unpartitioned.sql`): `NotificationLog`, `AuditLog` y los muertos de
+      `NotificationOutbox` (`Status = 3`), que el worker deja ahí al agotar los intentos de envío y
+      tampoco se purgaban. `MessageDedupe` y `RefreshToken` se movieron ahí desde
+      `sp_Gateway_PurgeExpiredPartitions`, porque son este mismo mecanismo —DELETE por lotes con
+      descanso— y no tenían nada que hacer dentro de la purga de particiones. En seco **cuenta** lo
+      que borraría, que es lo que hace útil la semana de `@DryRun = 1`.
+- [x] Vigilante, en `sp_Gateway_Watchdog` (`db/13-watchdog.sql`): avisa si quedan menos de 3 meses de
+      particiones, si el backlog pasa del umbral o si hay leases vencidos hace más de 15 minutos sin
+      liberar (lo que significa que el despachador no está corriendo). Avisa **fallando**: lanza
+      `RAISERROR` con severidad 16, así que el job falla y queda en su historial. Se hace así para no
+      depender de que Database Mail esté configurado en una instancia que no es nuestra.
+- [x] Script de los cuatro jobs: `db/14-sql-agent-jobs.sql`. **Los nombres llevan el nombre de la
+      base** (`DB_NAME()`), porque los jobs son del servidor y dev y producción comparten instancia:
+      sin eso, el job creado desde una base apuntaría a la otra. La purga entra con `@DryRun = 1` en
+      sus dos pasos.
 
-  | Job | Frecuencia | Qué ejecuta |
+  | Job | Cuándo | Qué ejecuta |
   |---|---|---|
-  | Particiones futuras | Semanal, domingo 2:00 | `EXEC dbo.sp_Gateway_EnsureFuturePartitions @MonthsAhead = 6;` |
-  | Purga | Diaria, 3:00 | `EXEC dbo.sp_Gateway_PurgeExpiredPartitions @MetadataRetentionDays = 90, @PayloadRetentionDays = 14, @AttemptRetentionDays = 30, @DryRun = 0;` + purga por lotes de `NotificationLog`/`AuditLog` |
-  | Estadísticas | Diaria, 3:30 | `UPDATE STATISTICS` de las cuatro tablas de tráfico |
-  | Vigilancia | Cada 10 min | Avisar si quedan < 3 meses de particiones o si el backlog (`Status IN (0,2)`) supera un umbral |
+  | `… - Particiones futuras` | Domingos 02:00 | `sp_Gateway_EnsureFuturePartitions @MonthsAhead = 6` |
+  | `… - Purga` | Diario 03:00 | `sp_Gateway_PurgeExpiredPartitions` y `sp_Gateway_PurgeUnpartitionedLogs`, los dos en seco |
+  | `… - Estadisticas` | Diario 03:30 | `UPDATE STATISTICS` de las cuatro tablas de tráfico |
+  | `… - Vigilancia` | Cada 10 min | `sp_Gateway_Watchdog` |
 
-  Notas: el SP de purga trae `@DryRun = 1` por defecto; la purga solo borra meses completos
-  (14 días reales = 14–45); `TRUNCATE` toma un bloqueo exclusivo breve, por eso de madrugada.
-- [ ] Decidir con el DBA la política de copias (`SIMPLE` actual o `FULL` con copias de log).
+- [ ] **Ejecutar `db/14` está sin hacer, y es decisión tuya.** Crea jobs en `msdb`, que es de la
+      instancia compartida y no de la base: no es un cambio que se haga sin avisar. Necesita
+      pertenecer a `SQLAgentUserRole` o más. Cuando se ejecute, hay que dejar la purga una semana en
+      seco, mirar el historial del job y solo entonces poner `@DryRun = 0` en sus dos pasos.
+- [ ] Conectar el aviso del vigilante a un correo: definir un operador y marcar "notificar al fallar"
+      en el job. Es el paso del DBA.
+- [ ] Decidir con el DBA la política de copias (`SIMPLE` actual o `FULL` con copias de log). No es
+      una tarea de código.
+
+**Verificado contra `WebhookGateway_dev` (2026-10-01).** Los procedimientos se aplicaron y se
+probaron ahí: el dry-run es de solo lectura y el borrado real se probó dentro de una transacción que
+luego se deshizo (quedaron 0 filas de prueba).
+
+- `sp_Gateway_PurgeExpiredPartitions @DryRun = 1` sigue funcionando después de quitarle los borrados
+  por lotes: con la retención de 90/14/30 no hay nada que vaciar en esa base, y lo dice.
+- `sp_Gateway_PurgeUnpartitionedLogs @DryRun = 1` informa de las cinco tablas con su columna de
+  fecha, su corte y cuántas filas borraría.
+- Borrado real: de 2 auditorías viejas + 1 reciente borró las 2 viejas; de 2 alertas borró la vieja;
+  de la bandeja de salida borró la muerta y **no** tocó la viva, que es la que el worker todavía
+  tiene que enviar.
+- `sp_Gateway_Watchdog` no devuelve nada cuando todo está bien, y con el umbral forzado lanza
+  `RAISERROR` de severidad 16 y error 50000, que es lo que hará fallar al job. Ojo al comprobarlo a
+  mano: el `RAISERROR` va después del `SELECT`, así que un cliente que solo lea el primer resultado
+  no ve el error y parece que no lo lanza.
+
+**Un bug encontrado de paso, y arreglado.** `ThrottleLease.Dispose()` lanzaba
+`ObjectDisposedException` cuando el freno de su destino se había reemplazado mientras la entrega
+estaba en vuelo, que es lo que pasa cada vez que alguien cambia el ritmo o la concurrencia de un
+destino en el panel. El comentario del código decía que las entregas en vuelo "terminan con él", pero
+el semáforo se desechaba de inmediato. Como el `using` del despachador cae dentro de su try/catch, el
+síntoma no era una caída sino un error en el log por cada entrega en vuelo en ese momento. Lo
+encontró `EndpointThrottlesTests`.
 
 ### Fase 4 — Alertas y panel (2 días)
 

@@ -6,6 +6,9 @@
       sp_Gateway_EnsureFuturePartitions   crea meses por delante
       sp_Gateway_PurgeExpiredPartitions   vacía los meses ya vencidos
 
+    Aquí solo se purga lo particionado. Las tablas que no lo están tienen su propio procedimiento
+    en 12-purge-unpartitioned.sql, porque se borran por lotes y no con TRUNCATE.
+
     La purga usa TRUNCATE TABLE ... WITH (PARTITIONS ...), disponible desde SQL Server
     2016. Es una operación mínimamente registrada y no necesita tablas de staging ni
     SWITCH, así que evita por completo el crecimiento del log que provocaría un DELETE
@@ -117,28 +120,12 @@ BEGIN
     CLOSE cur;
     DEALLOCATE cur;
 
-    /* Purga por lotes con descanso para evitar contención de candados en ráfagas nocturnas */
-    IF @DryRun = 0
-    BEGIN
-        DECLARE @deletedDedupe int = 1;
-        WHILE @deletedDedupe > 0
-        BEGIN
-            DELETE TOP (10000) FROM dbo.MessageDedupe WHERE ExpiresAt < SYSUTCDATETIME();
-            SET @deletedDedupe = @@ROWCOUNT;
-            IF @deletedDedupe > 0
-                WAITFOR DELAY '00:00:00.050';
-        END;
-
-        DECLARE @deletedRefresh int = 1;
-        WHILE @deletedRefresh > 0
-        BEGIN
-            DELETE TOP (10000) FROM dbo.RefreshToken WHERE ExpiresAt < DATEADD(DAY, -30, SYSUTCDATETIME());
-            SET @deletedRefresh = @@ROWCOUNT;
-            IF @deletedRefresh > 0
-                WAITFOR DELAY '00:00:00.050';
-        END;
-    END
-
+    /*
+        Las tablas sin particionar —MessageDedupe, RefreshToken, NotificationLog, AuditLog y los
+        muertos de NotificationOutbox— se purgan en sp_Gateway_PurgeUnpartitionedLogs
+        (12-purge-unpartitioned.sql). Se borran fila a fila por lotes, que es otro mecanismo, y el
+        job nocturno llama a los dos procedimientos.
+    */
     SELECT TableName, Partitions, Cutoff, Rows, WouldDelete = @DryRun FROM @plan;
 END
 GO

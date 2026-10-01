@@ -124,7 +124,21 @@ public sealed class ThrottleLease(SemaphoreSlim? slots, RateLimitLease? lease) :
 
     public void Dispose()
     {
-        lease?.Dispose();
-        slots?.Release();
+        /*
+            El freno puede haberse desechado mientras esta entrega estaba en vuelo: pasa cada vez
+            que alguien cambia el ritmo o la concurrencia del destino desde el panel. Devolver el
+            hueco a un freno que ya no existe no significa nada, así que no es un error que haya que
+            registrar ni propagar; antes lo era, y ensuciaba el log con una excepción por cada
+            entrega en vuelo en el momento del cambio.
+        */
+        try
+        {
+            lease?.Dispose();
+            slots?.Release();
+        }
+        catch (ObjectDisposedException)
+        {
+            // El freno al que pertenecía este turno ya se reemplazó.
+        }
     }
 }
