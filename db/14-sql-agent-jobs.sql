@@ -23,7 +23,13 @@ IF OBJECT_ID(N'dbo.sp_Gateway_Watchdog') IS NULL
    OR OBJECT_ID(N'dbo.sp_Gateway_PurgeExpiredPartitions') IS NULL
    OR OBJECT_ID(N'dbo.sp_Gateway_PurgeUnpartitionedLogs') IS NULL
 BEGIN
-    RAISERROR(N'Esta base no tiene los procedimientos del gateway. Ejecuta primero 04, 12 y 13, y hazlo en la base del gateway.', 20, 1) WITH LOG;
+    /*
+        Severidad 16 y SET NOEXEC ON, no severidad 20: los niveles 19 a 25 solo los puede usar un
+        sysadmin, y este script está pensado para ejecutarse en un servidor compartido donde puede
+        que no lo seamos. NOEXEC hace que el resto no se ejecute.
+    */
+    RAISERROR(N'Esta base no tiene los procedimientos del gateway. Ejecuta primero 04, 12 y 13, y hazlo en la base del gateway.', 16, 1);
+    SET NOEXEC ON;
 END
 GO
 
@@ -242,4 +248,7 @@ LEFT JOIN msdb.dbo.sysjobschedules js ON js.job_id = j.job_id
 LEFT JOIN msdb.dbo.sysschedules sch ON sch.schedule_id = js.schedule_id
 WHERE j.name LIKE DB_NAME() + N' - %'
 ORDER BY j.name;
+GO
+
+SET NOEXEC OFF;
 GO

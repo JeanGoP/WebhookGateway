@@ -167,7 +167,7 @@ public sealed class DispatcherWorker(
     /// </summary>
     private async Task ShutDownAsync()
     {
-        using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(_options.ShutdownGraceSeconds));
 
         try
         {

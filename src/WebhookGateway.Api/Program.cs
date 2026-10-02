@@ -21,6 +21,21 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddGatewayData(builder.Configuration);
 
+/*
+    El plazo que el host da a los servicios en segundo plano para terminar cuando se le pide
+    parar. Por defecto son CINCO segundos, y eso no alcanza: el apagado ordenado del
+    despachador espera a que terminen las entregas en vuelo, vuelca los resultados pendientes y
+    libera sus leases, con quince segundos de margen propio. Con el valor de fábrica el host
+    dejaba de esperar antes de que acabara, así que los leases no se liberaban y esas entregas
+    se quedaban bloqueadas hasta vencer —tres minutos— en vez de volver a la cola al instante.
+
+    Tiene que ser mayor que DispatcherOptions.ShutdownGraceSeconds. Y detrás de IIS hay un
+    tercer plazo, el shutdownTimeLimit de web.config, que también tiene que dar margen: ver
+    docs/despliegue-iis.md.
+*/
+builder.Services.Configure<HostOptions>(host =>
+    host.ShutdownTimeout = TimeSpan.FromSeconds(30));
+
 // La cola en memoria la necesita la recepción siempre; el despachador solo si esta
 // instancia además entrega. Separarlos permite escalar recepción y despacho por su cuenta.
 builder.Services.AddDeliveryQueue();

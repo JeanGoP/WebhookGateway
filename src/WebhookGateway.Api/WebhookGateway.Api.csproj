@@ -17,6 +17,20 @@
     <UseAppHost>false</UseAppHost>
   </PropertyGroup>
 
+  <!--
+		appsettings.Development.json NO se publica. Sigue copiandose al compilar, asi que depurar
+		en local funciona igual; lo que se evita es mandarlo al servidor.
+
+		Dos razones. Lleva una cadena de conexion con contrasena apuntando a WebhookGateway_dev, y
+		eso no tiene nada que hacer en produccion. Y aunque con ASPNETCORE_ENVIRONMENT=Production no
+		se cargue, si el archivo esta ahi basta con que alguien defina ese entorno como Development
+		para que produccion empiece a escribir en la base de desarrollo. Si el archivo no viaja, esa
+		puerta no existe.
+	-->
+  <ItemGroup>
+    <Content Update="appsettings.Development.json" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\WebhookGateway.Core\WebhookGateway.Core.csproj" />
     <ProjectReference Include="..\WebhookGateway.Data\WebhookGateway.Data.csproj" />

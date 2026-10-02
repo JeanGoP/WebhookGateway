@@ -60,6 +60,17 @@ public sealed class DispatcherOptions
     /// <summary>Filas tocadas como máximo por cada pasada de mantenimiento.</summary>
     public int MaintenanceBatchSize { get; set; } = 500;
 
+    /// <summary>
+    /// Margen para el apagado ordenado: terminar lo que está en vuelo, volcar los resultados y
+    /// liberar los leases. Si se agota, los leases se liberan solos al vencer, pero eso son tres
+    /// minutos de entregas quietas en cada despliegue.
+    /// </summary>
+    /// <remarks>
+    /// Tiene que caber dentro de <c>HostOptions.ShutdownTimeout</c> (30 s, fijado en Program.cs) y,
+    /// detrás de IIS, dentro del <c>shutdownTimeLimit</c> de web.config.
+    /// </remarks>
+    public int ShutdownGraceSeconds { get; set; } = 15;
+
     /// <summary>Segundos que se cachea la configuración de un destino antes de releerla.</summary>
     public int TargetCacheSeconds { get; set; } = 30;
 

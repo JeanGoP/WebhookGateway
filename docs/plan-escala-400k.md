@@ -3,10 +3,11 @@
 Documento de continuidad. Quien retome este trabajo (persona o Claude) debe leer primero
 `CLAUDE.md`, después este archivo, y solo entonces tocar código.
 
-Última actualización: 2026-10-01. **Fases 1, 2, 3 y 4 escritas. `dotnet build` sin avisos y los
-184 unitarios en verde. El SQL de las cuatro fases está verificado contra `WebhookGateway_dev`. Lo
-que no se ha visto funcionar es el despachador nuevo entero: eso necesita la suite de integración,
-que pide Docker. Ver el final de cada fase.**
+Última actualización: 2026-10-02. **Fases 1 a 5 escritas. `dotnet build` sin avisos y 184 unitarios
+en verde. Todo el SQL está verificado contra `WebhookGateway_dev`. Lo que no se ha visto funcionar es
+el despachador nuevo entero: eso necesita la suite de integración, que pide Docker. Queda la fase 6,
+la prueba de carga, y los pasos de despliegue, que son del dueño del servidor. Ver el final de cada
+fase.**
 
 > **La verificación con Docker va a una máquina aparte.** En este equipo no hay Docker ni se va a
 > poner: hay otra máquina dedicada a eso, y ahí se pasará la suite de integración más adelante
@@ -403,14 +404,61 @@ datos de prueba se sembraron dentro de una transacción que luego se deshizo (qu
   duplicadas y nada más; por endpoint y rango de fechas, las 6 del endpoint; y la página siguiente con
   `AfterId` no repite ninguna.
 
-### Fase 5 — Despliegue en IIS (1 día)
+### Fase 5 — Despliegue en IIS (1 día) · **escrita; ejecutarla es tuyo**
 
-- [ ] Una vez desplegado el despachador nuevo, borrar el índice `IX_Delivery_Dispatch`: lo usaba el
-      claim con `ROW_NUMBER()` y ya no lo usa nadie. Mientras producción corra el código anterior
-      tiene que seguir ahí, porque es el que sostiene su claim.
-- [ ] App pool con `AlwaysRunning`, sin tiempo de inactividad, reciclaje controlado.
-- [ ] Valorar el despachador como Servicio de Windows aparte
-      (`Gateway:Dispatcher:Enabled = false` en la API).
+Todo lo de esta fase está en **`docs/despliegue-iis.md`**, que antes no existía: `despliegue.md`
+habla de Render y no mencionaba IIS ni una vez.
+
+- [x] Guía de despliegue en IIS: comprobaciones previas, Hosting Bundle, app pool, permisos del
+      `appsettings.json`, publicado, verificación posterior y qué vigilar los primeros días.
+- [x] Los cuatro ajustes del app pool, con el porqué de cada uno: `No Managed Code`,
+      `AlwaysRunning`, **tiempo de inactividad a 0** (el de fábrica son 20 minutos, y pasado ese
+      rato sin peticiones HTTP IIS mata el proceso y el despachador con él) y reciclaje periódico
+      desactivado (el de fábrica son 29 h, así que el pool se recicla a una hora distinta cada día).
+      Más `preloadEnabled` en el sitio, que es lo que hace que `AlwaysRunning` sirva de algo.
+- [x] `db/15-drop-legacy-dispatch-index.sql`, para borrar `IX_Delivery_Dispatch` **después** del
+      despliegue. Lleva un guardia que aborta si `IX_Delivery_DispatchByEndpoint` no existe:
+      borrarlo antes dejaría a la versión en producción recorriendo la tabla en cada ciclo.
+- [x] Valoración del despachador como Servicio de Windows aparte, en la guía. **Recomendación: no
+      separarlo todavía.** El arreglo de la fase 1 ya quita el motivo más fuerte —antes una
+      `SqlException` del despachador paraba el proceso entero, recepción incluida— y con los cuatro
+      ajustes del pool bien puestos el riesgo que la separación evita queda cubierto. La guía dice
+      en qué tres casos conviene volver a mirarlo.
+
+**Tres cosas que aparecieron al mirar esto de cerca, y están arregladas.**
+
+- **El apagado ordenado no estaba funcionando.** `HostOptions.ShutdownTimeout` vale **5 segundos**
+  por defecto, y el apagado del despachador —esperar las entregas en vuelo, volcar resultados,
+  liberar leases— se da 15. El host dejaba de esperar antes de que acabara, así que los leases se
+  quedaban colgados y esas entregas no volvían a la cola hasta vencer: **tres minutos quietas en
+  cada reciclaje del pool**. Ahora son 30 s en `Program.cs`, el margen del despachador es
+  configurable (`Gateway:Dispatcher:ShutdownGraceSeconds`) y detrás de IIS hay un tercer plazo,
+  `shutdownTimeLimit` en `web.config`, cuyo valor de fábrica son 10 s. Los tres van en escalera:
+  **15 < 30 < 45**.
+- **`web.config` propio en el proyecto**, con `shutdownTimeLimit="45"` y, sobre todo, con
+  `ASPNETCORE_ENVIRONMENT=Production` explícito. Sin esa variable el entorno ya sería Production,
+  pero dejarlo implícito significa que basta con que alguien la defina como Development en la
+  máquina para que se cargue `appsettings.Development.json` y producción escriba en
+  `WebhookGateway_dev`. Solo lo lee IIS, así que el despliegue en Render no se entera.
+- **`appsettings.Development.json` ya no se publica.** Sí se publicaba, de modo que el servidor de
+  producción acababa con un archivo con cadena de conexión y contraseña apuntando a `_dev`. Sigue
+  copiándose al compilar, así que depurar en local no cambia.
+
+**Verificado.** `dotnet build` sin avisos, 184 unitarios en verde, y un `dotnet publish -c Release`
+a una carpeta de prueba confirma que el `web.config` sale con los tres atributos puestos y que
+`appsettings.Development.json` no viaja. `db/15` se probó contra `WebhookGateway_dev` dentro de
+transacciones que se deshicieron (el DDL en SQL Server es transaccional): sin el índice nuevo el
+guardia aborta y **no** borra el viejo; con él presente borra el viejo y deja el nuevo; y una
+segunda pasada no falla.
+
+De paso, los guardias de `db/14` y `db/15` usaban `RAISERROR` con severidad 20, que **solo puede
+usar un sysadmin**: en este servidor compartido habrían fallado con un error de permisos en vez de
+con su mensaje. Ahora usan severidad 16 y `SET NOEXEC ON`, que es el patrón que ya usaba
+`db/setup-dev-db.sql`.
+
+- [ ] **Ejecutar el despliegue es tuyo.** Los pasos que no puedo dar yo: aplicar `db/11` a
+      producción, devolver `appsettings.json` a `Database=WebhookGateway`, configurar el app pool y
+      publicar. Y después, `db/15`.
 
 ### Fase 6 — Prueba de carga y salida (2–3 días)
 
