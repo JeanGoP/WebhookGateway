@@ -163,6 +163,7 @@ app.MapSubscribers();
 app.MapAlertActions();
 app.MapNotificationLogs();
 app.MapRetention();
+app.MapCapacity();
 
 await app.RunAsync();
 

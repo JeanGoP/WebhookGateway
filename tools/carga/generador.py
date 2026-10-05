@@ -3,7 +3,10 @@ Generador de carga "crudo": manda TOTAL webhooks a la recepción del gateway tan
 HILOS conexiones keep-alive, y apunta códigos y latencias. Todo contra localhost.
 
 A los CAIDA_EN segundos tumba el destino falso durante CAIDA_DURA segundos, para ver el
-cortacircuitos, los reintentos y la recuperación con el backlog lleno.
+cortacircuitos, los reintentos y la recuperación con el backlog lleno (CAIDA=0 la desactiva).
+
+Si aparece un archivo ABORTAR junto al script, deja de enviar: es la salida de emergencia del
+guardián cuando la prueba va contra un servidor compartido.
 
 Progreso cada 5 s en progreso-generador.json; resumen final en resumen-generador.json.
 """
@@ -21,10 +24,17 @@ TOTAL = int(os.environ.get("TOTAL", 300_000))
 HILOS = int(os.environ.get("HILOS", 48))
 # Ritmo fijo en webhooks por segundo; 0 es "tan rápido como se pueda".
 RITMO = float(os.environ.get("RITMO", 0))
-RUTA = "/in/ghl/leads"
+# Sin barra inicial también vale: Git Bash convierte "/in/..." en una ruta de Windows al pasarla.
+RUTA = "/" + os.environ.get("RUTA", "in/ghl/leads").lstrip("/")
+CAIDA = os.environ.get("CAIDA", "1") != "0"
 CAIDA_EN, CAIDA_DURA = 360, 120
+# Rampa: los primeros RAMPA_SEGUNDOS a RAMPA_RITMO/s, y después a RITMO.
+RAMPA_RITMO = float(os.environ.get("RAMPA_RITMO", 0))
+RAMPA_SEGUNDOS = float(os.environ.get("RAMPA_SEGUNDOS", 0))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ABORTAR = os.path.join(HERE, "ABORTAR")
+abortado = {"si": False}
 lock = threading.Lock()
 counter = {"enviadas": 0}
 codes = {}
@@ -56,19 +66,28 @@ def body(i):
     }).encode()
 
 
+def momento(i):
+    """Cuándo toca enviar el webhook i, con la rampa inicial si la hay."""
+    en_rampa = RAMPA_RITMO * RAMPA_SEGUNDOS
+    if RAMPA_RITMO > 0 and i <= en_rampa:
+        return inicio + (i - 1) / RAMPA_RITMO
+    if RITMO > 0:
+        return inicio + (RAMPA_SEGUNDOS if RAMPA_RITMO > 0 else 0) + (i - 1 - en_rampa) / RITMO
+    return None
+
+
 def worker():
     conn = http.client.HTTPConnection("127.0.0.1", 5092, timeout=30)
     while True:
         with lock:
-            if counter["enviadas"] >= TOTAL:
+            if counter["enviadas"] >= TOTAL or abortado["si"]:
                 break
             counter["enviadas"] += 1
             i = counter["enviadas"]
         payload = body(i)
-        if RITMO > 0:
-            espera = inicio + (i - 1) / RITMO - time.time()
-            if espera > 0:
-                time.sleep(espera)
+        cuando = momento(i)
+        if cuando is not None and cuando > time.time():
+            time.sleep(cuando - time.time())
         t0 = time.perf_counter()
         try:
             conn.request("POST", RUTA, payload, {"Content-Type": "application/json"})
@@ -108,7 +127,9 @@ def monitor(threads):
     while any(t.is_alive() for t in threads):
         time.sleep(5)
         elapsed = time.time() - inicio
-        if not caida_hecha and elapsed >= CAIDA_EN:
+        if os.path.exists(ABORTAR):
+            abortado["si"] = True
+        if CAIDA and not caida_hecha and elapsed >= CAIDA_EN:
             caida_hecha = control("caido")
         if caida_hecha and not levantado and elapsed >= CAIDA_EN + CAIDA_DURA:
             levantado = control("arriba")
@@ -124,6 +145,7 @@ def monitor(threads):
             "p50_ms": pct(window, 0.50), "p95_ms": pct(window, 0.95), "p99_ms": pct(window, 0.99),
             "codigos": snap_codes,
             "destino": "caido" if caida_hecha and not levantado else "arriba",
+            "abortado": abortado["si"],
         }
         last_count, last_t = done, now
         with open(os.path.join(HERE, "progreso-generador.json"), "w", encoding="utf-8") as f:
@@ -141,7 +163,8 @@ if __name__ == "__main__":
         t.join()
     total_s = time.time() - inicio
     resumen = {
-        "total": TOTAL, "hilos": HILOS, "ritmo_objetivo": RITMO, "segundos": round(total_s), "ritmo_medio_por_s": round(TOTAL / total_s, 1),
+        "total": TOTAL, "enviadas": sum(codes.values()), "abortado": abortado["si"],
+        "hilos": HILOS, "ritmo_objetivo": RITMO, "ruta": RUTA, "segundos": round(total_s), "ritmo_medio_por_s": round(sum(codes.values()) / total_s, 1),
         "codigos": codes,
         "p50_ms": pct(latencies_all, 0.50), "p95_ms": pct(latencies_all, 0.95),
         "p99_ms": pct(latencies_all, 0.99), "max_ms": round(max(latencies_all), 1),

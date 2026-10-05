@@ -31,10 +31,11 @@ publicar y **en este orden**:
 | `16-inbound-transient-status.sql` | Código de rechazo por endpoint de entrada | EF Core lee la columna: sin ella, la recepción falla |
 | `17-retention-policy.sql` | Tabla de retención (180/30/30) | La usan la pantalla de Configuración y el guardado de destinos |
 | `04-partition-maintenance.sql` | Purga que lee la retención de la tabla | Lo usa el job de purga |
+| `18-capacity-report.sql` | Informe de capacidad (`sp_Gateway_CapacityReport`) | Solo lee; no lo usa el código, es para diagnosticar |
 
 ```powershell
 foreach ($f in '11-delivery-dispatch-by-endpoint', '13-watchdog', '16-inbound-transient-status',
-               '17-retention-policy', '04-partition-maintenance') {
+               '17-retention-policy', '04-partition-maintenance', '18-capacity-report') {
     sqlcmd -S 200.7.96.218 -U egutierrez -d WebhookGateway -b -i ".\db\$f.sql"
 }
 ```
@@ -246,6 +247,12 @@ que la separación evita queda cubierto. Merece la pena volver a mirarlo si pasa
 ---
 
 ## Cosas que vigilar los primeros días
+
+- **Si la configuración se queda corta:** `EXEC dbo.sp_Gateway_CapacityReport;` (últimos 15 min).
+  Por destino da la concurrencia media que usó frente a su `MaxConcurrency`, el ritmo frente a su
+  `RateLimitPerMinute`, el retraso y un diagnóstico; y en global, el uso de `MaxGlobalConcurrency`,
+  de `MaxEndpointsInParallel` y del pool de SQL. Los topes de `appsettings.json` se le pasan como
+  parámetros si no son los recomendados (256, 32, 40 y 120).
 
 - **El tamaño del pool de conexiones.** `MaxPoolSize` está en 120, y el despachador puede tener
   hasta `MaxEndpointsInParallel` (32) destinos avanzando, cada uno abriendo conexiones cortas para

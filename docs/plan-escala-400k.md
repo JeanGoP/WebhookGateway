@@ -120,6 +120,11 @@ La muestra es pequeña; si los cuerpos crecen, el tamaño crece en proporción.
 - [x] SQL Server Agent confirmado en ejecución.
 - [x] Particiones: última frontera de `PF_Monthly` = **2027-07-01** (~9 meses de margen).
 - [x] Mediciones de producción (§1).
+- [x] `WebhookGateway_dev` al día con el código de §7.5 y §7.6 (2026-10-05): aplicados 13, 16, 17 y 04,
+      comprobados ejecutando la función de retraso, el vigilante y la purga en seco. El motor es
+      SQL Server 2025 Enterprise (nivel de compatibilidad 160), y desde este equipo hay ~23 ms por
+      viaje a SQL. Tiene dos destinos reales activos (AppHaku por un túnel de Cloudflare y el CRM en
+      `development.sidecil.com`), sin entregas pendientes: desactivarlos antes de una prueba de carga.
 
 ---
 
@@ -566,6 +571,37 @@ servidor real.
 
 **Sin explicar:** en la prueba cruda el despacho bajó un rato a 6–30/s (15:35–15:41) sin
 crecimiento de archivos ni bloqueos que lo justifiquen. No se repitió en la realista.
+
+### 7.7 Prueba contra `_dev` del servidor real (2026-10-05) · **hecha, abortada por el guardián**
+
+La API en este equipo contra `WebhookGateway_dev` (servidor compartido, ~23 ms por viaje a SQL), con
+el destino falso local, los dos destinos reales desactivados mientras duró y una integración propia
+(`carga`, desactivada al acabar). Rampa de 2 min a 20/s y después 70/s, con un guardián
+(`guardian-dev.ps1`) que abortaba si la ida y vuelta a SQL pasaba de 200 ms dos veces seguidas, si
+producción dejaba de responder sano o si la recepción daba algo distinto de 202.
+
+- **El guardián abortó en el webhook 47.233 de 60.000** por dos viajes a SQL de más de 200 ms
+  (llegó a 658). Esos picos aparecieron también a 20/s y con la cola vacía y sin carga (329 ms a
+  las 17:09:43): vienen de la red o de otra actividad del servidor, no de la prueba. Con más
+  datos, el umbral del guardián puede pedir tres seguidas en vez de dos.
+- **Recepción:** 47.233 de 47.233 con 202; p50 27 ms (casi todo red), p95 290 ms, p99 454 ms.
+- **Servidor compartido:** CPU entre el 1 % y el 5 % durante toda la prueba. Producción respondió
+  sano todo el tiempo (150–340 ms, lo mismo que antes de empezar).
+- **Exactitud:** 47.234 entregadas = 47.234 recibidas por el destino, 0 duplicadas.
+- **El despacho no llegó a 70/s:** 48–66/s, así que el retraso subió hasta ~2 min (por debajo de
+  los 15 aceptados). En LocalDB, con el mismo destino, iba a 70–80/s. La diferencia es la red:
+  cada vez que la bomba repone hace tres viajes a SQL (volcar, reclamar, cargar cuerpos), y con
+  25 ms y picos de cientos de ms la concurrencia se vacía mientras espera. Si el IIS de producción
+  está junto al SQL Server, esto no aplica; si no, conviene que la bomba reclame lo siguiente
+  mientras envía, en vez de entre medias.
+
+**Informe de capacidad (`db/18`, 2026-10-05).** `sp_Gateway_CapacityReport` responde «¿se queda corta
+la configuración?» con lo que ya se guarda: la concurrencia media de cada destino sale de los
+`DeliveryAttempt` por la ley de Little (suma de duraciones ÷ ventana) y se compara con su
+`MaxConcurrency`, su ritmo y su retraso; en global, con `MaxGlobalConcurrency`,
+`MaxEndpointsInParallel` y el pool. Probado con los datos de la prueba realista (70,5 de 96 en el
+tramo estable, 78,1 recuperándose) y con casos simulados de despachador parado, concurrencia al
+límite y cupo global lleno. Cuesta ~550 páginas por consulta.
 
 ### Fase 6 — Prueba de carga y salida (2–3 días) · **hecha en LocalDB (§7.6)**
 
