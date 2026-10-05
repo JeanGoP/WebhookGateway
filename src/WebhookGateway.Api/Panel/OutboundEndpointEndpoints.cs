@@ -99,6 +99,11 @@ public static class OutboundEndpointEndpoints
             entity.AuthConfig = codec.Encode(authJson, authType);
         }
 
+        if (await WindowErrorAsync(db, entity.DeliveryWindowHours, ct) is { } windowError)
+        {
+            return Results.BadRequest(new ErrorResponse(windowError));
+        }
+
         db.OutboundEndpoints.Add(entity);
         audit.Log(http.User, "create", "OutboundEndpoint", null,
             new { entity.Name, entity.TargetUrl, entity.AuthType }, PanelHelpers.ClientIp(http));
@@ -124,6 +129,11 @@ public static class OutboundEndpointEndpoints
 
         request.ApplyTo(entity, codec);
 
+        if (await WindowErrorAsync(db, entity.DeliveryWindowHours, ct) is { } windowError)
+        {
+            return Results.BadRequest(new ErrorResponse(windowError));
+        }
+
         audit.Log(http.User, "update", "OutboundEndpoint", id.ToString(CultureInfo.InvariantCulture),
             new { request.Name, request.IsActive, request.AuthType, request.TargetUrl },
             PanelHelpers.ClientIp(http));
@@ -131,5 +141,21 @@ public static class OutboundEndpointEndpoints
         inboundConfig.Invalidate();
 
         return Results.Ok(entity.ToDto());
+    }
+
+    /// <summary>
+    /// La ventana de entrega no puede durar más de lo que se guardan los cuerpos: la purga borraría el
+    /// de una entrega que todavía se reintenta, y esa entrega ya no se podría enviar. Es la misma regla
+    /// que comprueba la pantalla de retención, vista desde el otro lado.
+    /// </summary>
+    private static async Task<string?> WindowErrorAsync(GatewayDbContext db, int windowHours, CancellationToken ct)
+    {
+        var payloadDays = await db.RetentionPolicies.Select(p => (int?)p.PayloadDays).FirstOrDefaultAsync(ct);
+
+        return payloadDays is { } days && windowHours > days * 24
+            ? $"La ventana de entrega ({windowHours} h) no puede pasar de lo que se guardan los cuerpos " +
+              $"({days} días): la purga borraría el cuerpo de entregas que aún se reintentan. Sube antes la " +
+              "retención de los cuerpos en Configuración."
+            : null;
     }
 }

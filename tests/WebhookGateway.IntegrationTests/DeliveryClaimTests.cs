@@ -21,7 +21,7 @@ public sealed class DeliveryClaimTests(SqlServerFixture fixture)
     /// workers pelean por las mismas filas del mismo destino, que es el peor caso para READPAST y
     /// UPDLOCK. Si el claim no fuese atómico, aquí saldría una entrega repetida.
     /// </summary>
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task Claim_bajo_workers_concurrentes_no_duplica_ni_pierde_ninguna_entrega()
     {
         await fixture.ResetDeliveriesAsync();
@@ -81,7 +81,7 @@ public sealed class DeliveryClaimTests(SqlServerFixture fixture)
     /// destino con cinco entregas no espera detrás del que tiene cien, porque ni siquiera mira su
     /// backlog.
     /// </summary>
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task Un_destino_con_mucho_backlog_no_estorba_al_que_tiene_poco()
     {
         await fixture.ResetDeliveriesAsync();
@@ -108,12 +108,14 @@ public sealed class DeliveryClaimTests(SqlServerFixture fixture)
         (await fixture.CountByStatusAsync(DeliveryStatus.Pending)).ShouldBe(100);
     }
 
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task El_claim_respeta_el_tamaño_de_lote_y_sirve_lo_mas_vencido_primero()
     {
         await fixture.ResetDeliveriesAsync();
 
-        // La más antigua primero: el claim ordena por NextAttemptAt.
+        // La más vencida entra en el lote. El claim ya no lleva ORDER BY —ordenar obligaba a leer
+        // todo el backlog—, pero dentro de un mismo mes el índice va por NextAttemptAt, y el TOP
+        // toma las primeras que encuentra en ese orden.
         var primera = await fixture.InsertDeliveryAsync(
             DeliveryStatus.Pending, 7, Now.AddMinutes(-30), Now.AddHours(1), createdAt: Now);
 
@@ -130,10 +132,11 @@ public sealed class DeliveryClaimTests(SqlServerFixture fixture)
         batch.Select(d => d.Id).ShouldContain(primera);
     }
 
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task El_descubrimiento_solo_devuelve_destinos_con_trabajo_vencido()
     {
         await fixture.ResetDeliveriesAsync();
+        await fixture.EnsureOutboundEndpointsAsync(10, 11, 12, 13);
 
         // Vencida: toca ya.
         await fixture.InsertDeliveryAsync(

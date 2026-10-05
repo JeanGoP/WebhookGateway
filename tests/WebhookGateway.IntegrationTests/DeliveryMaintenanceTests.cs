@@ -13,7 +13,7 @@ public sealed class DeliveryMaintenanceTests(SqlServerFixture fixture)
 {
     private static readonly DateTime Now = new(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc);
 
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task Recupera_solo_los_leases_vencidos_y_deja_intactos_los_vigentes()
     {
         await fixture.ResetDeliveriesAsync();
@@ -42,7 +42,7 @@ public sealed class DeliveryMaintenanceTests(SqlServerFixture fixture)
         v.WorkerId.ShouldBe("worker-vivo");
     }
 
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task Caduca_las_entregas_pasadas_de_ventana_y_dejan_de_reclamarse()
     {
         await fixture.ResetDeliveriesAsync();

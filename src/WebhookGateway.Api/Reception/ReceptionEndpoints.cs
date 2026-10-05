@@ -1,7 +1,10 @@
 using System.Data.Common;
 using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Extensions.Options;
 using WebhookGateway.Core.Auth;
 using WebhookGateway.Core.Common;
+using WebhookGateway.Data.Configuration;
 
 namespace WebhookGateway.Api.Reception;
 
@@ -21,6 +24,8 @@ public static class ReceptionEndpoints
         string endpoint,
         HttpRequest httpRequest,
         InboundMessageReceiver receiver,
+        InboundEndpointLookup lookup,
+        IOptions<ReceptionOptions> options,
         CancellationToken cancellationToken)
     {
         var body = await ReadBodyAsync(httpRequest, cancellationToken);
@@ -50,16 +55,30 @@ public static class ReceptionEndpoints
                 }),
                 onFailure: MapFailure);
         }
-        catch (Exception ex) when (ex is SqlException or DbException or TimeoutException)
+        catch (Exception ex) when (IsPersistenceFailure(ex))
         {
             // La regla dura: nunca 2xx sin haber persistido. Mejor que el emisor reintente
-            // a que crea que el webhook llegó cuando en realidad se perdió.
+            // a que crea que el webhook llegó cuando en realidad se perdió. Y con el código que
+            // ESTE emisor entiende como "reintenta": GHL solo reintenta un 429, y un 503 lo da
+            // por perdido. La configuración sale de memoria: SQL es justo lo que no responde.
+            var status = lookup.LastKnown(integration, endpoint)?.TransientFailureStatusCode
+                         ?? options.Value.TransientFailureStatusCode;
+
             httpRequest.HttpContext.Response.Headers["Retry-After"] = "5";
             return Results.Problem(
                 "El sistema no puede persistir en este momento. Reintenta en unos segundos.",
-                statusCode: StatusCodes.Status503ServiceUnavailable);
+                statusCode: status);
         }
     }
+
+    /// <summary>
+    /// SQL no responde, llegue el fallo por donde llegue. La configuración del endpoint se lee con EF
+    /// Core, y su estrategia de reintentos, al agotarlos, envuelve el SqlException en un
+    /// RetryLimitExceededException. Sin contarlo, un endpoint que aún no estaba en memoria respondía
+    /// 500 en vez del código de rechazo, y GHL da un 500 por perdido.
+    /// </summary>
+    private static bool IsPersistenceFailure(Exception ex) =>
+        ex is SqlException or DbException or TimeoutException or RetryLimitExceededException;
 
     private static IResult MapFailure(Failure error) => error.Code switch
     {

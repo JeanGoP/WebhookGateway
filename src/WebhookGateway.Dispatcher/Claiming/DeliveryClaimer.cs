@@ -32,12 +32,25 @@ public sealed class DeliveryClaimer(ISqlConnectionFactory connectionFactory)
         UPDLOCK las reserva para esta transacción. Eso es lo que hace que dos instancias vivas
         durante un despliegue no se pisen: sin claim atómico serían entregas duplicadas.
 
-        Antes esto reclamaba un lote global y lo repartía con ROW_NUMBER() PARTITION BY destino,
-        que numeraba todo el backlog pendiente en cada ciclo y bloqueaba cada fila que leía. Ahora
-        cada destino pide lo suyo: con IX_Delivery_DispatchByEndpoint —(OutboundEndpointId,
-        NextAttemptAt), filtrado por Status IN (0, 2)— es una búsqueda directa que no toca ni mira
-        las filas de los demás destinos. El reparto justo ya no lo da el SQL, lo da que cada
-        destino avance por su cuenta.
+        Cada destino pide lo suyo con IX_Delivery_DispatchByEndpoint —(OutboundEndpointId,
+        NextAttemptAt), filtrado por Status IN (0, 2)—, una búsqueda que no toca las filas de los
+        demás destinos.
+
+        Sin ORDER BY, y es a propósito. Con él, el claim leía TODO lo vencido del destino para
+        quedarse con veinte: el índice está partido por mes y el motor no puede sacar ese orden de
+        él, así que lo ordenaba entero. Con un destino caído unas horas eso son cien mil filas
+        leídas por claim, y como UPDLOCK bloquea cada fila leída, pasadas unas 5.000 SQL Server
+        escala a un bloqueo de tabla que frena también los INSERT de la recepción. Sin ORDER BY el
+        TOP para en cuanto tiene sus veinte: lee y bloquea lo que reclama, haya diez pendientes o
+        un millón. El orden que queda —por mes y, dentro del mes, por NextAttemptAt— sirve primero
+        lo más vencido en la práctica, aunque no lo garantiza; el orden de entrega nunca se
+        garantizó, porque cada destino envía varias a la vez.
+
+        El índice va nombrado, y no es desconfianza gratuita: medido con 300.000 pendientes, el
+        optimizador elegía IX_Delivery_Backlog —(OutboundEndpointId, Status)— y miraba en la tabla
+        la fecha de cada fila. Con un destino lleno de reintentos programados para más tarde eso
+        vuelve a ser leer y bloquear todo su backlog. Si el índice no existe, la consulta falla con
+        un error claro en vez de volverse lenta en silencio: db/11 va antes que este código.
     */
     private const string ClaimForEndpointSql = """
         UPDATE d
@@ -49,31 +62,49 @@ public sealed class DeliveryClaimer(ISqlConnectionFactory connectionFactory)
         FROM dbo.WebhookDelivery AS d
         INNER JOIN (
             SELECT TOP (@BatchSize) Id, CreatedAt
-            FROM dbo.WebhookDelivery WITH (READPAST, UPDLOCK, ROWLOCK)
+            FROM dbo.WebhookDelivery WITH (READPAST, UPDLOCK, ROWLOCK, INDEX(IX_Delivery_DispatchByEndpoint))
             WHERE OutboundEndpointId = @EndpointId
               AND Status IN (0, 2)
               AND NextAttemptAt <= @Now
               AND ExpiresAt > @Now
-            ORDER BY NextAttemptAt, Id
         ) AS Pick ON Pick.Id = d.Id AND Pick.CreatedAt = d.CreatedAt;
         """;
 
     /*
-        Qué destinos tienen trabajo vencido. El supervisor lo pregunta cada ciclo para saber a
-        quién hay que poner en marcha, así que tiene que ser barato: con el índice filtrado por
-        Status IN (0, 2) y OutboundEndpointId como primera clave, el motor recorre un valor
-        distinto por destino y no las filas de cada uno.
+        Qué destinos tienen trabajo vencido. El supervisor lo pregunta cada vez que llega algo,
+        hasta cuatro veces por segundo, así que tiene que costar lo mismo con diez pendientes que
+        con un millón.
+
+        Por eso va destino por destino: para cada uno, una búsqueda en el índice que para en la
+        primera fila vencida. Antes era un SELECT DISTINCT sobre todo lo pendiente, que con un
+        destino caído recorría su backlog entero en cada pasada. Los destinos son decenas; las
+        filas pendientes pueden ser cientos de miles.
+
+        No se filtra por IsActive: un destino desactivado con entregas pendientes también tiene que
+        aparecer, para que su bomba las cierre como "destino desactivado" en vez de dejarlas
+        esperando a caducar. Una entrega cuyo destino se borró de la tabla no aparece; la caduca
+        el mantenimiento al vencer su ventana.
+
+        El índice va nombrado por lo mismo que en el claim, y aquí se midió peor: con TOP (1) el
+        optimizador supone que la primera fila que mire servirá y recorre la tabla agrupada. Para
+        el destino con el backlog acierta enseguida; para cualquier otro, atraviesa el backlog
+        entero buscando la suya. Con 300.000 pendientes, unas mil páginas por pasada.
 
         Sin UPDLOCK ni READPAST: aquí no se reserva nada, solo se pregunta. Que la respuesta se
         quede corta o larga por un instante no importa, porque el claim de cada destino es el que
         decide de verdad.
     */
     private const string EndpointsWithWorkSql = """
-        SELECT DISTINCT OutboundEndpointId
-        FROM dbo.WebhookDelivery WITH (NOLOCK)
-        WHERE Status IN (0, 2)
-          AND NextAttemptAt <= @Now
-          AND ExpiresAt > @Now;
+        SELECT e.Id
+        FROM dbo.OutboundEndpoint AS e
+        CROSS APPLY (
+            SELECT TOP (1) 1 AS HasWork
+            FROM dbo.WebhookDelivery AS d WITH (NOLOCK, INDEX(IX_Delivery_DispatchByEndpoint))
+            WHERE d.OutboundEndpointId = e.Id
+              AND d.Status IN (0, 2)
+              AND d.NextAttemptAt <= @Now
+              AND d.ExpiresAt > @Now
+        ) AS w;
         """;
 
     /* Una instancia que muere deja su lease colgado. Al vencer, la entrega vuelve a la cola. */

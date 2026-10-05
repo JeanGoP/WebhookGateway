@@ -435,6 +435,9 @@ GO
       sp_Gateway_EnsureFuturePartitions   crea meses por delante
       sp_Gateway_PurgeExpiredPartitions   vacía los meses ya vencidos
 
+    Aquí solo se purga lo particionado. Las tablas que no lo están tienen su propio procedimiento
+    en 12-purge-unpartitioned.sql, porque se borran por lotes y no con TRUNCATE.
+
     La purga usa TRUNCATE TABLE ... WITH (PARTITIONS ...), disponible desde SQL Server
     2016. Es una operación mínimamente registrada y no necesita tablas de staging ni
     SWITCH, así que evita por completo el crecimiento del log que provocaría un DELETE
@@ -475,14 +478,32 @@ BEGIN
 END
 GO
 
+/*
+    Los días salen de dbo.RetentionPolicy (17-retention-policy.sql), que se edita desde el panel. Los
+    parámetros siguen existiendo para una ejecución a mano: si se pasan, mandan sobre la tabla. Sin
+    tabla ni parámetros —el script 17 sin aplicar— se usan 180/30/30.
+*/
 CREATE OR ALTER PROCEDURE dbo.sp_Gateway_PurgeExpiredPartitions
-    @MetadataRetentionDays int = 365,
-    @PayloadRetentionDays  int = 30,
-    @AttemptRetentionDays  int = 90,
+    @MetadataRetentionDays int = NULL,
+    @PayloadRetentionDays  int = NULL,
+    @AttemptRetentionDays  int = NULL,
     @DryRun                bit = 1   -- por defecto no borra: primero se mira qué haría
 AS
 BEGIN
     SET NOCOUNT ON;
+
+    IF OBJECT_ID(N'dbo.RetentionPolicy') IS NOT NULL
+    BEGIN
+        SELECT @MetadataRetentionDays = ISNULL(@MetadataRetentionDays, MetadataDays),
+               @PayloadRetentionDays  = ISNULL(@PayloadRetentionDays, PayloadDays),
+               @AttemptRetentionDays  = ISNULL(@AttemptRetentionDays, AttemptDays)
+        FROM dbo.RetentionPolicy
+        WHERE Id = 1;
+    END
+
+    SET @MetadataRetentionDays = ISNULL(@MetadataRetentionDays, 180);
+    SET @PayloadRetentionDays  = ISNULL(@PayloadRetentionDays, 30);
+    SET @AttemptRetentionDays  = ISNULL(@AttemptRetentionDays, 30);
 
     DECLARE @plan TABLE (
         TableName  sysname,
@@ -546,31 +567,14 @@ BEGIN
     CLOSE cur;
     DEALLOCATE cur;
 
-    /* Purga por lotes con descanso para evitar contención de candados en ráfagas nocturnas */
-    IF @DryRun = 0
-    BEGIN
-        DECLARE @deletedDedupe int = 1;
-        WHILE @deletedDedupe > 0
-        BEGIN
-            DELETE TOP (10000) FROM dbo.MessageDedupe WHERE ExpiresAt < SYSUTCDATETIME();
-            SET @deletedDedupe = @@ROWCOUNT;
-            IF @deletedDedupe > 0
-                WAITFOR DELAY '00:00:00.050';
-        END;
-
-        DECLARE @deletedRefresh int = 1;
-        WHILE @deletedRefresh > 0
-        BEGIN
-            DELETE TOP (10000) FROM dbo.RefreshToken WHERE ExpiresAt < DATEADD(DAY, -30, SYSUTCDATETIME());
-            SET @deletedRefresh = @@ROWCOUNT;
-            IF @deletedRefresh > 0
-                WAITFOR DELAY '00:00:00.050';
-        END;
-    END
-
+    /*
+        Las tablas sin particionar —MessageDedupe, RefreshToken, NotificationLog, AuditLog y los
+        muertos de NotificationOutbox— se purgan en sp_Gateway_PurgeUnpartitionedLogs
+        (12-purge-unpartitioned.sql). Se borran fila a fila por lotes, que es otro mecanismo, y el
+        job nocturno llama a los dos procedimientos.
+    */
     SELECT TableName, Partitions, Cutoff, Rows, WouldDelete = @DryRun FROM @plan;
 END
-GO
 GO
 
 -- =====================================================================
@@ -1084,13 +1088,20 @@ GO
 /*
     WebhookGateway — vigilante. Idempotente.
 
-    Comprueba las dos cosas que, si pasan desapercibidas, se convierten en pérdida de mensajes:
+    Comprueba lo que, si pasa desapercibido, se convierte en pérdida de mensajes:
 
       1. Que no se acaben las particiones futuras. Si se acaban, los INSERT de tráfico empiezan a
          fallar y la recepción devuelve 503 a todo el mundo. Es el fallo más grave posible aquí y el
          más fácil de evitar, porque se ve venir con meses de antelación.
       2. Que el backlog de entregas no crezca sin parar. Un backlog que sube y no baja significa que
          el despachador no da el ritmo o que un destino está caído.
+      3. Que ninguna entrega lleve esperando más de lo acordado (15 minutos por defecto). Es la
+         cifra que de verdad dice si vamos al día: un backlog grande que se vacía a tiempo no es un
+         problema, y uno pequeño que no avanza sí.
+      4. Que no queden leases huérfanos.
+
+    También define dbo.fn_Gateway_DeliveryLag, que el panel usa para mostrar el retraso de cada
+    destino. Va aquí, antes del procedimiento, porque el vigilante la necesita.
 
     Cómo avisa: devuelve una fila por problema y, si hay alguno, lanza RAISERROR con severidad 16.
     Eso hace que el job de SQL Agent **falle**, y un job que falla sale en su historial y puede
@@ -1104,9 +1115,46 @@ GO
 SET NOCOUNT ON;
 GO
 
+/*
+    Retraso de cada destino: cuánto lleva esperando la entrega vencida más antigua que aún no se ha
+    enviado. Solo salen los destinos que tienen alguna.
+
+    Es MIN(NextAttemptAt) por destino, pero escrito así por una razón medida: el índice está partido
+    por mes, y un MIN o un TOP (1) ORDER BY sobre todas las particiones obliga al motor a leer todo
+    lo pendiente del destino —con 300.000 pendientes, 1.233 páginas—. Pedido partición por partición,
+    cada una es una búsqueda que para en la primera fila: 80 páginas para el mismo resultado.
+*/
+CREATE OR ALTER FUNCTION dbo.fn_Gateway_DeliveryLag (@Now datetime2(3))
+RETURNS TABLE
+AS
+RETURN
+    SELECT
+        e.Id                                    AS OutboundEndpointId,
+        MIN(x.NextAttemptAt)                    AS OldestDueAt,
+        DATEDIFF(SECOND, MIN(x.NextAttemptAt), @Now) AS LagSeconds
+    FROM dbo.OutboundEndpoint AS e
+    CROSS JOIN (
+        SELECT p.partition_number
+        FROM sys.partitions AS p
+        WHERE p.object_id = OBJECT_ID(N'dbo.WebhookDelivery') AND p.index_id = 1
+    ) AS pt
+    CROSS APPLY (
+        SELECT TOP (1) d.NextAttemptAt
+        FROM dbo.WebhookDelivery AS d WITH (INDEX(IX_Delivery_DispatchByEndpoint))
+        WHERE d.OutboundEndpointId = e.Id
+          AND d.Status IN (0, 2)
+          AND d.NextAttemptAt <= @Now
+          AND d.ExpiresAt > @Now
+          AND $PARTITION.PF_Monthly(d.CreatedAt) = pt.partition_number
+        ORDER BY d.NextAttemptAt
+    ) AS x
+    GROUP BY e.Id;
+GO
+
 CREATE OR ALTER PROCEDURE dbo.sp_Gateway_Watchdog
     @MinMonthsOfPartitions int = 3,
-    @MaxBacklog            int = 50000
+    @MaxBacklog            int = 50000,
+    @MaxLagMinutes         int = 15
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -1156,7 +1204,25 @@ BEGIN
             + N'destino está caído o limitando el ritmo.');
     END
 
-    /* ---------- 3. Leases huérfanos ---------- */
+    /* ---------- 3. Retraso de entrega ---------- */
+
+    DECLARE @peorDestino nvarchar(200), @peorRetraso int;
+
+    SELECT TOP (1) @peorDestino = o.Name, @peorRetraso = l.LagSeconds
+    FROM dbo.fn_Gateway_DeliveryLag(SYSUTCDATETIME()) AS l
+    JOIN dbo.OutboundEndpoint AS o ON o.Id = l.OutboundEndpointId
+    ORDER BY l.LagSeconds DESC;
+
+    IF @peorRetraso > @MaxLagMinutes * 60
+    BEGIN
+        INSERT INTO @problemas VALUES ('Retraso',
+            N'El destino "' + @peorDestino + N'" tiene entregas esperando desde hace '
+            + CONVERT(nvarchar(20), @peorRetraso / 60) + N' minutos, por encima del umbral de '
+            + CONVERT(nvarchar(20), @MaxLagMinutes) + N'. O el destino no da abasto con su ritmo y '
+            + N'concurrencia, o el despachador no está corriendo.');
+    END
+
+    /* ---------- 4. Leases huérfanos ---------- */
 
     /*
         Entregas reclamadas cuyo lease venció hace rato: el mantenimiento del despachador debería
@@ -1183,6 +1249,7 @@ BEGIN
         ComprobadoUtc   = SYSUTCDATETIME(),
         MesesDeMargen   = @mesesDeMargen,
         Backlog         = @backlog,
+        PeorRetrasoMin  = @peorRetraso / 60,
         LeasesHuerfanos = @huerfanas
     FROM @problemas;
 
@@ -1196,6 +1263,64 @@ BEGIN
         -- Severidad 16: el job falla y queda visible en su historial.
         RAISERROR(N'Vigilante del gateway: %s', 16, 1, @resumen);
     END
+END
+GO
+
+-- =====================================================================
+-- 16-inbound-transient-status.sql
+-- =====================================================================
+PRINT '-> 16-inbound-transient-status.sql';
+GO
+IF COL_LENGTH(N'dbo.InboundEndpoint', N'TransientFailureStatusCode') IS NULL
+BEGIN
+    ALTER TABLE dbo.InboundEndpoint ADD TransientFailureStatusCode smallint NULL;
+END
+GO
+
+-- =====================================================================
+-- 17-retention-policy.sql
+-- =====================================================================
+PRINT '-> 17-retention-policy.sql';
+GO
+/*
+    WebhookGateway — retención editable desde el panel. Idempotente.
+
+    Una sola fila con los días que se guarda cada cosa. La purga nocturna
+    (sp_Gateway_PurgeExpiredPartitions, en 04) la lee en cada ejecución, así que cambiarla en el panel
+    surte efecto la noche siguiente sin tocar el job.
+
+    Es global y no por integración, y no por gusto: la purga vacía particiones mensuales enteras con
+    TRUNCATE, y una partición lleva mezcladas todas las integraciones de ese mes. Retener una
+    integración más que otra exigiría borrar fila a fila, que es justo lo que la purga por
+    particiones evita en un servidor compartido.
+
+    Valores iniciales: mensajes y entregas 180 días, cuerpos 30, intentos 30.
+
+    Compatible con el código desplegado: tabla nueva que la versión anterior no conoce. Aplicar
+    antes de publicar la versión que la usa.
+*/
+
+SET NOCOUNT ON;
+GO
+
+IF OBJECT_ID(N'dbo.RetentionPolicy') IS NULL
+BEGIN
+    CREATE TABLE dbo.RetentionPolicy (
+        Id           tinyint       NOT NULL CONSTRAINT PK_RetentionPolicy PRIMARY KEY
+                                            CONSTRAINT CK_RetentionPolicy_Single CHECK (Id = 1),
+        MetadataDays int           NOT NULL,   -- WebhookMessage y WebhookDelivery
+        PayloadDays  int           NOT NULL,   -- WebhookPayload
+        AttemptDays  int           NOT NULL,   -- DeliveryAttempt
+        UpdatedAt    datetime2(3)  NOT NULL CONSTRAINT DF_RetentionPolicy_UpdatedAt DEFAULT SYSUTCDATETIME(),
+        UpdatedBy    nvarchar(200) NULL
+    );
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.RetentionPolicy)
+BEGIN
+    INSERT INTO dbo.RetentionPolicy (Id, MetadataDays, PayloadDays, AttemptDays)
+    VALUES (1, 180, 30, 30);
 END
 GO
 

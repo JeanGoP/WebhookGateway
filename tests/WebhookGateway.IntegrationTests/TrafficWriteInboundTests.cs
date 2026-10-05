@@ -23,7 +23,7 @@ public sealed class TrafficWriteInboundTests(SqlServerFixture fixture)
     /// (3930) y el procedimiento fallaba, así que la recepción respondía 503 a un duplicado, que
     /// es justo lo que tiene que resolverse sin error.
     /// </summary>
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task Dos_recepciones_simultaneas_con_la_misma_clave_dejan_un_solo_mensaje_bueno()
     {
         var seed = await ResetAndSeedAsync();
@@ -51,7 +51,7 @@ public sealed class TrafficWriteInboundTests(SqlServerFixture fixture)
         (await CountAsync("SELECT COUNT(*) FROM dbo.WebhookMessage;")).ShouldBe(2);
     }
 
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task Una_clave_que_ya_existe_se_marca_duplicada_sin_crear_entregas()
     {
         var seed = await ResetAndSeedAsync();
@@ -68,7 +68,7 @@ public sealed class TrafficWriteInboundTests(SqlServerFixture fixture)
         (await CountAsync("SELECT COUNT(*) FROM dbo.WebhookDelivery;")).ShouldBe(1);
     }
 
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task Claves_distintas_no_se_estorban()
     {
         var seed = await ResetAndSeedAsync();
@@ -82,7 +82,7 @@ public sealed class TrafficWriteInboundTests(SqlServerFixture fixture)
         (await CountAsync("SELECT COUNT(*) FROM dbo.WebhookDelivery;")).ShouldBe(8);
     }
 
-    [RequiresDockerFact]
+    [RequiresSqlServerFact]
     public async Task Sin_clave_de_deduplicacion_cada_recepcion_es_un_mensaje_nuevo()
     {
         var seed = await ResetAndSeedAsync();

@@ -1,4 +1,5 @@
 using Dapper;
+using Microsoft.Extensions.Options;
 using WebhookGateway.Data.Db;
 
 namespace WebhookGateway.Api.Panel;
@@ -7,7 +8,7 @@ namespace WebhookGateway.Api.Panel;
 /// Monitor en tiempo real para una integración: <c>/api/integrations/{id}/live-status</c>.
 /// Diseñado para sondeo continuo de alta frecuencia (1s a 15s) con 1 solo roundtrip y WITH (NOLOCK).
 /// </summary>
-public static class IntegrationLiveStatusEndpoints
+public static partial class IntegrationLiveStatusEndpoints
 {
     /// <summary>
     /// Ventana de los conteos históricos. La cola activa no se acota: ver el comentario del SQL.
@@ -33,15 +34,16 @@ public static class IntegrationLiveStatusEndpoints
 
             Así que: la cola activa (0, 1, 2) va completa y sale de índices filtrados por estado, que
             solo contienen lo pendiente. Lo terminal (3 a 6), que es lo que crece para siempre, se
-            acota a 24 horas.
+            acota a 24 horas. La activa se agrupa además por destino: cuesta lo mismo, porque recorre
+            las mismas filas, y dice cuál de los destinos es el que acumula.
         */
-        SELECT Status, COUNT_BIG(1) AS Total
+        SELECT OutboundEndpointId, Status, COUNT_BIG(1) AS Total
         FROM dbo.WebhookDelivery WITH (NOLOCK)
         WHERE OutboundEndpointId IN (
             SELECT Id FROM dbo.OutboundEndpoint WITH (NOLOCK) WHERE IntegrationId = @IntegrationId
         )
           AND Status IN (0, 1, 2)
-        GROUP BY Status;
+        GROUP BY OutboundEndpointId, Status;
 
         SELECT Status, COUNT_BIG(1) AS Total
         FROM dbo.WebhookDelivery WITH (NOLOCK)
@@ -88,6 +90,13 @@ public static class IntegrationLiveStatusEndpoints
         WHERE o.IntegrationId = @IntegrationId
           AND d.CreatedAt >= DATEADD(HOUR, -@WindowHours, SYSUTCDATETIME())
         ORDER BY d.CreatedAt DESC, d.Id DESC;
+
+        -- Cuánto lleva esperando la entrega vencida más antigua de cada destino. La función vive en
+        -- db/13 porque el vigilante usa la misma cuenta; ahí está por qué se pide por partición.
+        SELECT l.OutboundEndpointId, l.LagSeconds
+        FROM dbo.fn_Gateway_DeliveryLag(SYSUTCDATETIME()) AS l
+        JOIN dbo.OutboundEndpoint AS o WITH (NOLOCK) ON o.Id = l.OutboundEndpointId
+        WHERE o.IntegrationId = @IntegrationId;
         """;
 
     public static void MapIntegrationLiveStatus(this WebApplication app)
@@ -101,7 +110,7 @@ public static class IntegrationLiveStatusEndpoints
     }
 
     private static async Task<IResult> GetLiveStatusAsync(
-        int id, ISqlConnectionFactory connectionFactory, CancellationToken ct)
+        int id, ISqlConnectionFactory connectionFactory, IOptions<MonitoringOptions> monitoring, CancellationToken ct)
     {
         using var connection = await connectionFactory.OpenAsync(ct);
         using var multi = await connection.QueryMultipleAsync(
@@ -114,11 +123,18 @@ public static class IntegrationLiveStatusEndpoints
             return Results.NotFound(new ErrorResponse("Integración no encontrada."));
         }
 
-        var activeRows = (await multi.ReadAsync<StatusCountRow>()).ToDictionary(r => r.Status, r => r.Total);
+        var activeByEndpoint = (await multi.ReadAsync<EndpointStatusCountRow>()).ToList();
         var terminalRows = (await multi.ReadAsync<StatusCountRow>()).ToDictionary(r => r.Status, r => r.Total);
         var outboundRows = await multi.ReadAsync<OutboundHealthRow>();
         var trafficRow = await multi.ReadFirstOrDefaultAsync<TrafficSummaryRow>();
         var recentRows = await multi.ReadAsync<RecentDeliveryRow>();
+        var lagByEndpoint = (await multi.ReadAsync<EndpointLagRow>())
+            .ToDictionary(r => r.OutboundEndpointId, r => r.LagSeconds);
+
+        var activeRows = activeByEndpoint
+            .GroupBy(r => r.Status).ToDictionary(g => g.Key, g => g.Sum(r => r.Total));
+        var activePerEndpoint = activeByEndpoint
+            .GroupBy(r => r.OutboundEndpointId).ToDictionary(g => g.Key, g => g.Sum(r => r.Total));
 
         // La cola activa es el total real. Lo terminal es de las últimas WindowHours.
         var pending = activeRows.GetValueOrDefault((byte)0, 0);
@@ -136,7 +152,9 @@ public static class IntegrationLiveStatusEndpoints
         var outbound = outboundRows.Select(o => new OutboundHealthItemDto(
             o.Id, o.Name, o.TargetUrl, o.RateLimitPerMinute, o.MaxConcurrency, o.IsActive,
             MapHealthStatus(o.HealthStatus), o.ConsecutiveFailures,
-            o.LastStatusCode, o.LastErrorMessage, o.LastTransitionAt)).ToList();
+            o.LastStatusCode, o.LastErrorMessage, o.LastTransitionAt,
+            activePerEndpoint.GetValueOrDefault(o.Id, 0),
+            lagByEndpoint.TryGetValue(o.Id, out var lag) ? lag : null)).ToList();
 
         var traffic = new TrafficSummaryDto(
             trafficRow?.TotalMessages ?? 0,
@@ -149,37 +167,6 @@ public static class IntegrationLiveStatusEndpoints
 
         return Results.Ok(new IntegrationLiveStatusDto(
             integration.Id, integration.Name, integration.Slug, integration.IsActive,
-            queue, outbound, traffic, recent));
+            queue, outbound, traffic, recent, monitoring.Value.MaxLagMinutes * 60));
     }
-
-    private static string MapHealthStatus(byte status) => status switch
-    {
-        1 => "Degraded",
-        2 => "Down",
-        3 => "Recovered",
-        _ => "Healthy"
-    };
-
-    private static string MapDeliveryStatus(byte status) => status switch
-    {
-        1 => "InFlight",
-        2 => "Retrying",
-        3 => "Delivered",
-        4 => "Failed",
-        5 => "Expired",
-        6 => "Cancelled",
-        _ => "Pending"
-    };
-
-    private sealed record IntegrationHeaderRow(int Id, string Name, string Slug, bool IsActive, DateTime CreatedAt);
-    private sealed record StatusCountRow(byte Status, long Total);
-    private sealed record OutboundHealthRow(
-        int Id, string Name, string TargetUrl, int RateLimitPerMinute, int MaxConcurrency,
-        bool IsActive, byte HealthStatus, int ConsecutiveFailures,
-        int? LastStatusCode, string? LastErrorMessage, DateTime? LastTransitionAt);
-    private sealed record TrafficSummaryRow(
-        long TotalMessages, long DuplicateMessages, long NoSubscriptionMessages);
-    private sealed record RecentDeliveryRow(
-        long Id, DateTime CreatedAt, int OutboundEndpointId, string OutboundName,
-        byte Status, int AttemptCount, int? LastStatusCode, string? LastError);
 }

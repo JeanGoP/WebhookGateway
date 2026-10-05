@@ -38,6 +38,12 @@ public sealed class InboundEndpoint
     /// <summary>Se rechaza con 413 por encima de esto. Protege memoria y almacenamiento.</summary>
     public int MaxBodyBytes { get; set; } = 1024 * 1024;
 
+    /// <summary>
+    /// Código con el que se rechaza cuando no se puede guardar, elegido para que este emisor
+    /// reintente. Nulo usa el global. Ver <see cref="WebhookGateway.Core.Reception.TransientFailureStatus"/>.
+    /// </summary>
+    public short? TransientFailureStatusCode { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     public ICollection<Subscription> Subscriptions { get; } = [];

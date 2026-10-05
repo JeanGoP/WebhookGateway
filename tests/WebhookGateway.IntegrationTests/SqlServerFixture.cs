@@ -12,30 +12,44 @@ using Xunit;
 namespace WebhookGateway.IntegrationTests;
 
 /// <summary>
-/// Levanta un SQL Server real en contenedor y aplica el esquema de tráfico tal cual está
-/// en <c>db/</c>. El claim usa <c>READPAST/UPDLOCK</c> y <c>ROW_NUMBER</c> por destino: eso
-/// no se puede simular en memoria, solo un motor real reproduce el comportamiento bajo
-/// concurrencia. Compartida por toda la colección: arrancar SQL Server es lento.
+/// Un SQL Server real —en contenedor o local, ver <see cref="TestSqlServer"/>— con el esquema de
+/// tráfico tal cual está en <c>db/</c>. El claim usa <c>READPAST/UPDLOCK</c>: eso no se puede
+/// simular en memoria, solo un motor real reproduce el comportamiento bajo concurrencia.
+/// Compartida por toda la colección: arrancar SQL Server es lento.
 /// </summary>
 public sealed class SqlServerFixture : IAsyncLifetime
 {
     private const string DbName = "WebhookGatewayTest";
-    private readonly MsSqlContainer _container = new MsSqlBuilder().Build();
+
+    private readonly MsSqlContainer? _container =
+        TestSqlServer.ExistingServer is null ? new MsSqlBuilder().Build() : null;
 
     public ISqlConnectionFactory ConnectionFactory { get; private set; } = default!;
     public DeliveryClaimer Claimer { get; private set; } = default!;
 
     public async Task InitializeAsync()
     {
-        await _container.StartAsync();
+        var master = await StartServerAsync();
 
-        // El contenedor entrega una conexión a master. Creamos una base propia y la
-        // ponemos en Read Committed Snapshot, como hace db/00 en producción.
-        var master = new SqlConnectionStringBuilder(_container.GetConnectionString());
+        /*
+            La base se borra y se crea de nuevo en cada arranque. En un contenedor da igual, nace
+            vacío; en un servidor local la base sobrevive entre ejecuciones, y como los scripts son
+            idempotentes —«crear si no existe»— un índice cambiado en db/ no llegaría a aplicarse y
+            las pruebas validarían el esquema de la semana pasada. Read Committed Snapshot, como
+            hace db/00 en producción.
+        */
         await using (var conn = new SqlConnection(master.ConnectionString))
         {
             await conn.OpenAsync();
-            await conn.ExecuteAsync($"IF DB_ID('{DbName}') IS NULL CREATE DATABASE {DbName};");
+            await conn.ExecuteAsync(
+                $"""
+                IF DB_ID('{DbName}') IS NOT NULL
+                BEGIN
+                    ALTER DATABASE {DbName} SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+                    DROP DATABASE {DbName};
+                END
+                CREATE DATABASE {DbName};
+                """);
             await conn.ExecuteAsync(
                 $"ALTER DATABASE {DbName} SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;");
         }
@@ -51,7 +65,19 @@ public sealed class SqlServerFixture : IAsyncLifetime
         await RunScriptAsync("11-delivery-dispatch-by-endpoint.sql");
     }
 
-    public Task DisposeAsync() => _container.DisposeAsync().AsTask();
+    public Task DisposeAsync() => _container?.DisposeAsync().AsTask() ?? Task.CompletedTask;
+
+    /// <summary>Cadena a <c>master</c> del servidor de pruebas, arrancándolo si es un contenedor.</summary>
+    private async Task<SqlConnectionStringBuilder> StartServerAsync()
+    {
+        if (_container is null)
+        {
+            return new SqlConnectionStringBuilder(TestSqlServer.ExistingServer) { InitialCatalog = "master" };
+        }
+
+        await _container.StartAsync();
+        return new SqlConnectionStringBuilder(_container.GetConnectionString());
+    }
 
     /// <summary>Abre una conexión a la base de pruebas (la misma que usa el claim).</summary>
     public Task<IDbConnection> OpenAsync() => ConnectionFactory.OpenAsync(CancellationToken.None);

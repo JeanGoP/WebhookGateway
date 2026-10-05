@@ -89,6 +89,11 @@ public static class InboundEndpointEndpoints
             return Results.BadRequest(new ErrorResponse("Nombre y slug son obligatorios."));
         }
 
+        if (request.TransientStatusError() is { } statusError)
+        {
+            return Results.BadRequest(new ErrorResponse(statusError));
+        }
+
         if (!await db.Integrations.AnyAsync(i => i.Id == integrationId, ct))
         {
             return Results.NotFound(new ErrorResponse("Integración no encontrada."));
@@ -113,6 +118,7 @@ public static class InboundEndpointEndpoints
             DedupeStrategy = request.DedupeStrategy ?? DedupeStrategy.None,
             DedupeSource = request.DedupeSource?.Trim(),
             MaxBodyBytes = request.MaxBodyBytes ?? 1024 * 1024,
+            TransientFailureStatusCode = InboundEndpointPatch.ToColumn(request.TransientFailureStatusCode ?? 0),
         };
 
         if (request.AuthConfig is { ValueKind: not JsonValueKind.Null } authJson
@@ -123,7 +129,7 @@ public static class InboundEndpointEndpoints
 
         db.InboundEndpoints.Add(entity);
         audit.Log(http.User, "create", "InboundEndpoint", null,
-            new { entity.Name, entity.Slug, entity.AuthType }, PanelHelpers.ClientIp(http));
+            new { entity.Name, entity.Slug, entity.AuthType, entity.TransientFailureStatusCode }, PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
         inboundConfig.Invalidate();
 
@@ -144,10 +150,16 @@ public static class InboundEndpointEndpoints
             return Results.NotFound(new ErrorResponse("Endpoint de entrada no encontrado."));
         }
 
+        if (request.TransientStatusError() is { } statusError)
+        {
+            return Results.BadRequest(new ErrorResponse(statusError));
+        }
+
         request.ApplyTo(entity, codec);
 
         audit.Log(http.User, "update", "InboundEndpoint", id.ToString(CultureInfo.InvariantCulture),
-            new { request.Name, request.IsActive, request.AuthType }, PanelHelpers.ClientIp(http));
+            new { request.Name, request.IsActive, request.AuthType, request.TransientFailureStatusCode },
+            PanelHelpers.ClientIp(http));
         await db.SaveChangesAsync(ct);
         inboundConfig.Invalidate();
 

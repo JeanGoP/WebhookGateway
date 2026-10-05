@@ -8,7 +8,7 @@ que tiene que estar siempre despierto**. Casi todo lo que hay abajo existe por e
 
 ---
 
-## Antes de publicar: cuatro comprobaciones
+## Antes de publicar: seis comprobaciones
 
 **1. `appsettings.json` tiene que decir `Database=WebhookGateway`.**
 
@@ -20,16 +20,27 @@ Hoy apunta a `WebhookGateway_dev`. Si se publica así, **producción escribe en 
 desarrollo** y nadie se entera hasta que falta algo. Es la regla 4 de la §5 de
 `plan-escala-400k.md` y el error más fácil de cometer de todo el despliegue.
 
-**2. El esquema de producción tiene que estar al día.** Los scripts de `db/` son idempotentes.
-Para este despliegue hace falta, como mínimo, el índice del claim nuevo:
+**2. El esquema de producción tiene que estar al día.** Los scripts de `db/` son idempotentes y
+todos estos son compatibles con el código que está corriendo, así que se aplican **antes** de
+publicar y **en este orden**:
+
+| Script | Qué hace | Por qué antes de publicar |
+|---|---|---|
+| `11-delivery-dispatch-by-endpoint.sql` | Índice del claim por destino | El código nuevo lo nombra en sus consultas: sin él, el claim falla |
+| `13-watchdog.sql` | Función de retraso por destino y vigilante | El monitor del panel usa la función; necesita el índice del 11 |
+| `16-inbound-transient-status.sql` | Código de rechazo por endpoint de entrada | EF Core lee la columna: sin ella, la recepción falla |
+| `17-retention-policy.sql` | Tabla de retención (180/30/30) | La usan la pantalla de Configuración y el guardado de destinos |
+| `04-partition-maintenance.sql` | Purga que lee la retención de la tabla | Lo usa el job de purga |
 
 ```powershell
-sqlcmd -S 200.7.96.218 -U egutierrez -d WebhookGateway -i .\db\11-delivery-dispatch-by-endpoint.sql
+foreach ($f in '11-delivery-dispatch-by-endpoint', '13-watchdog', '16-inbound-transient-status',
+               '17-retention-policy', '04-partition-maintenance') {
+    sqlcmd -S 200.7.96.218 -U egutierrez -d WebhookGateway -b -i ".\db\$f.sql"
+}
 ```
 
-Se puede aplicar **antes** de desplegar: solo añade un índice y es compatible con el código que
-está corriendo. Si el servidor es Enterprise, añádele `ONLINE = ON` para no bloquear las
-escrituras mientras se crea; si es Standard, hazlo en horario de poco tráfico.
+El índice del 11 es lo único pesado. Si el servidor es Enterprise, añádele `ONLINE = ON` para no
+bloquear las escrituras mientras se crea; si es Standard, hazlo en horario de poco tráfico.
 
 `db/15-drop-legacy-dispatch-index.sql` va **después** de desplegar, no antes: mientras corra el
 código viejo, el índice que borra es el que sostiene su claim. El script lleva un guardia que
@@ -41,6 +52,26 @@ pero su clasificador enruta por ese nombre y no por el login. Si algún día se 
 valor la carga del gateway no queda capada.
 
 **4. Copia de seguridad completa y horario de poco tráfico.** Regla 7 de la §5 del plan.
+
+**5. Los webhooks que lleguen durante el despliegue.** Mientras IIS publica, responde 503 por su
+cuenta, y las apps del Marketplace de GHL **solo reintentan un 429**: lo que llegue en ese rato se
+pierde. Hay tres formas de cubrirlo:
+
+- Desplegar en la hora de menos tráfico.
+- Después, reenviar los fallidos desde el panel de logs de webhooks de GHL, que lo permite a mano.
+- Si el IIS tiene URL Rewrite, una regla temporal que responda 429 a `/in/*` durante el despliegue.
+
+**6. El código de rechazo para GHL.** Cuando SQL no responde, el gateway rechaza para que el emisor
+reintente, con el código que cada endpoint de entrada tenga configurado (panel → endpoint de entrada
+→ «Código si no se puede guardar»). Para la integración de GHL, **429**. Y como respaldo para cuando
+el proceso arranca con SQL ya caído y no sabe qué pidió cada endpoint, en `appsettings.json`, dentro
+de `Gateway`:
+
+```json
+"Reception": { "TransientFailureStatusCode": 429 }
+```
+
+Sin él vale 503, que es lo estándar y lo que GHL da por perdido.
 
 ---
 
@@ -172,7 +203,12 @@ SQL Server destino: 200.7.96.218 / WebhookGateway (entorno Production)
 **Si dice `WebhookGateway_dev`, para y revisa el `appsettings.json`.**
 
 Luego, que el despachador esté realmente despachando: `EXEC dbo.sp_Gateway_Watchdog;`. Si
-devuelve filas hablando de leases huérfanos o de backlog, algo no arrancó.
+devuelve filas hablando de leases huérfanos, de backlog o de retraso, algo no arrancó. El retraso es
+la cifra que importa: cuánto lleva esperando la entrega vencida más antigua de cada destino, con un
+umbral de 15 minutos (`@MaxLagMinutes`). El monitor del panel muestra la misma cifra por destino; su
+umbral es `Gateway:Monitoring:MaxLagMinutes`, y conviene que coincidan.
+
+Y después de este despliegue, `db/15-drop-legacy-dispatch-index.sql`.
 
 ---
 
@@ -216,5 +252,6 @@ que la separación evita queda cubierto. Merece la pena volver a mirarlo si pasa
   reclamar y volcar, además de las peticiones de la API. Si aparecen timeouts de "connection pool",
   ahí está el techo.
 - **Los jobs del Agente SQL** (`db/14-sql-agent-jobs.sql`), que todavía no están creados. El de
-  vigilancia es el que avisaría de casi todo lo demás.
+  vigilancia es el que avisaría de casi todo lo demás. El de purga ya no fija la retención: la lee
+  de la tabla que se edita en el panel (Configuración).
 - **La purga entra en seco.** Una semana mirando lo que *habría* borrado antes de dejarla borrar.

@@ -48,6 +48,7 @@ public sealed class InboundEndpointLookup(GatewayDbContext db, IMemoryCache cach
                 e.DedupeStrategy,
                 e.DedupeSource,
                 e.MaxBodyBytes,
+                e.TransientFailureStatusCode,
                 e.Subscriptions
                     .Where(s => s.IsActive && s.OutboundEndpoint!.IsActive)
                     .Select(s => new SubscriptionTarget(s.OutboundEndpointId, s.OutboundEndpoint!.DeliveryWindowHours))
@@ -56,8 +57,29 @@ public sealed class InboundEndpointLookup(GatewayDbContext db, IMemoryCache cach
 
         cache.Set(cacheKey, new CachedLookup(endpoint), endpoint is null ? MissDuration : HitDuration);
 
+        if (endpoint is not null)
+        {
+            cache.Set(LastKnownKey(integrationSlug, endpointSlug), endpoint);
+        }
+
         return endpoint;
     }
+
+    /// <summary>
+    /// La última configuración leída de este endpoint, aunque haya vencido. Solo memoria: no toca
+    /// SQL, así que sirve justo cuando SQL no responde.
+    /// </summary>
+    /// <remarks>
+    /// Para eso existe: al rechazar un webhook que no se pudo guardar hay que saber qué código
+    /// entiende su emisor como "reintenta", y la caché normal puede haber vencido durante la caída.
+    /// Cinco minutos de SQL caído bastarían para olvidarlo y responder a GHL un 503 que da por
+    /// perdido. Sin vencimiento: es una entrada por endpoint real, nunca por ruta inventada.
+    /// </remarks>
+    public InboundEndpointView? LastKnown(string integrationSlug, string endpointSlug) =>
+        cache.TryGetValue(LastKnownKey(integrationSlug, endpointSlug), out InboundEndpointView? view) ? view : null;
+
+    private static string LastKnownKey(string integrationSlug, string endpointSlug) =>
+        $"inbound_endpoint_last:{integrationSlug.ToLowerInvariant()}:{endpointSlug.ToLowerInvariant()}";
 
     /// <summary>Lo que se guarda en la caché. Una ruta inexistente es <c>Endpoint = null</c>.</summary>
     private sealed record CachedLookup(InboundEndpointView? Endpoint);
@@ -76,6 +98,7 @@ public sealed record InboundEndpointView(
     DedupeStrategy DedupeStrategy,
     string? DedupeSource,
     int MaxBodyBytes,
+    short? TransientFailureStatusCode,
     IReadOnlyList<SubscriptionTarget> Subscriptions);
 
 public sealed record SubscriptionTarget(int OutboundEndpointId, int DeliveryWindowHours);

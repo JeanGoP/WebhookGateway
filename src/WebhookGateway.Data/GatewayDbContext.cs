@@ -33,6 +33,8 @@ public sealed class GatewayDbContext(DbContextOptions<GatewayDbContext> options)
 
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
 
+    public DbSet<RetentionPolicy> RetentionPolicies => Set<RetentionPolicy>();
+
     public DbSet<IntegrationEmailSubscriber> EmailSubscribers => Set<IntegrationEmailSubscriber>();
 
     public DbSet<EndpointHealthState> EndpointHealthStates => Set<EndpointHealthState>();
@@ -98,6 +100,13 @@ public sealed class GatewayDbContext(DbContextOptions<GatewayDbContext> options)
             e.Property(x => x.TokenHash).HasMaxLength(32);
             e.HasIndex(x => x.TokenHash).IsUnique();
             e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId);
+        });
+
+        modelBuilder.Entity<RetentionPolicy>(e =>
+        {
+            e.ToTable("RetentionPolicy");
+            e.Property(x => x.Id).ValueGeneratedNever();
+            e.Property(x => x.UpdatedBy).HasMaxLength(200);
         });
 
         modelBuilder.Entity<AuditLog>(e =>

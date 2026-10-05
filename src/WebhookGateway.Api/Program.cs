@@ -11,6 +11,7 @@ using WebhookGateway.Api.Panel;
 using WebhookGateway.Api.Reception;
 using WebhookGateway.Core.Auth;
 using WebhookGateway.Core.Auth.Validators;
+using WebhookGateway.Core.Reception;
 using WebhookGateway.Data;
 using WebhookGateway.Data.Db;
 using WebhookGateway.Data.Traffic;
@@ -42,6 +43,12 @@ builder.Services.AddDeliveryQueue();
 builder.Services.AddGatewayDispatcher(builder.Configuration);
 
 // Recepción: un validador por InboundAuthType, resueltos por tipo en tiempo de petición.
+builder.Services.AddOptions<ReceptionOptions>()
+    .Bind(builder.Configuration.GetSection(ReceptionOptions.SectionName))
+    .Validate(
+        o => TransientFailureStatus.IsAllowed(o.TransientFailureStatusCode),
+        $"{ReceptionOptions.SectionName}:TransientFailureStatusCode tiene que ser uno de: {string.Join(", ", TransientFailureStatus.Allowed)}.")
+    .ValidateOnStart();
 builder.Services.AddScoped<InboundMessageReceiver>();
 builder.Services.AddSingleton<IInboundAuthValidator, NoAuthValidator>();
 builder.Services.AddSingleton<IInboundAuthValidator, ApiKeyInboundValidator>();
@@ -91,6 +98,7 @@ builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<JwtTokenGenerator>();
 builder.Services.AddScoped<AuditService>();
 builder.Services.AddScoped<MessageExplorer>();
+builder.Services.Configure<MonitoringOptions>(builder.Configuration.GetSection(MonitoringOptions.SectionName));
 
 builder.Services.AddHealthChecks()
     .AddCheck<SqlHealthCheck>("sql", tags: ["ready"]);
@@ -154,6 +162,7 @@ app.MapDeliveries();
 app.MapSubscribers();
 app.MapAlertActions();
 app.MapNotificationLogs();
+app.MapRetention();
 
 await app.RunAsync();
 

@@ -3,16 +3,17 @@
 Documento de continuidad. Quien retome este trabajo (persona o Claude) debe leer primero
 `CLAUDE.md`, después este archivo, y solo entonces tocar código.
 
-Última actualización: 2026-10-02. **Fases 1 a 5 escritas. `dotnet build` sin avisos y 184 unitarios
-en verde. Todo el SQL está verificado contra `WebhookGateway_dev`. Lo que no se ha visto funcionar es
-el despachador nuevo entero: eso necesita la suite de integración, que pide Docker. Queda la fase 6,
-la prueba de carga, y los pasos de despliegue, que son del dueño del servidor. Ver el final de cada
-fase.**
+Última actualización: 2026-10-05. **Fases 1 a 5 escritas, más una revisión (§7.5) que encontró que
+el claim y el descubrimiento costaban en proporción al backlog —el claim escalaba a bloqueo de
+tabla con 300.000 pendientes— y lo arregló, junto con otros cuatro paquetes. Ya no hace falta
+Docker: las pruebas de integración y la de carga corren contra LocalDB en este equipo. Queda la
+fase 6 y el despliegue.**
 
-> **La verificación con Docker va a una máquina aparte.** En este equipo no hay Docker ni se va a
-> poner: hay otra máquina dedicada a eso, y ahí se pasará la suite de integración más adelante
-> (decidido el 2026-10-01). Hasta entonces, el avance independiente por destino y el techo de
-> capacidad quedan escritos y compilando pero sin haberse visto funcionar en conjunto.
+> **Sin Docker, con LocalDB.** En este equipo no hay Docker, pero sí SQL Server LocalDB 17.0
+> (`MSSQLLocalDB`). Desde el 2026-10-05 la fixture de integración lo usa sola cuando no hay Docker,
+> y la prueba de carga también va contra él: local, sin tocar el servidor compartido. LocalDB está
+> capado (4 núcleos, ~1,4 GB), así que sus números salen pesimistas; lo que aguante ahí lo aguanta
+> producción.
 
 > **Control de aplicaciones de Windows (Smart App Control) va y viene en este equipo.** Bloquea la
 > DLL de pruebas recién compilada con `FileLoadException 0x800711C7` y entonces `dotnet test` dice
@@ -94,7 +95,10 @@ La muestra es pequeña; si los cuerpos crecen, el tamaño crece en proporción.
 
 | Tema | Decisión |
 |---|---|
-| Retención | Mensajes y entregas 90 días, cuerpos 14, intentos 30. Respuesta del destino solo en intentos fallidos. *Con las cifras medidas, se puede reconsiderar un año de historial (~42 GB).* |
+| Retención | **Editable desde el panel (Configuración)**, global. Por defecto mensajes y entregas 180 días, cuerpos 30, intentos 30 (~20 GB para la integración de 400k). Respuesta del destino solo en intentos fallidos. Decidido el 2026-10-05 |
+| Integración de 400k | Una sola integración nueva, de GHL (webhooks de **app del Marketplace**), con un destino. Las demás, 15k–30k/día. Retraso aceptable: **15 minutos**. El destino es lento y se mejorará después |
+| Orden de entrega | **No se garantiza ni hace falta** (decidido el 2026-10-05). El claim no ordena |
+| Rechazo cuando SQL falla | Código configurable por endpoint de entrada: GHL Marketplace **solo reintenta 429**; un 503 lo da por perdido |
 | Resource Governor | **No se aplica.** Confirmado inactivo (`is_enabled = 0`). Revisar tras la prueba de carga |
 | Mantenimiento | **Jobs de SQL Server Agent.** Agent confirmado en ejecución |
 | `appsettings.json` | **No se mueve nada** ni se pasan secretos a variables de entorno. Mitigación: fuera de git y lectura solo para la cuenta del app pool |
@@ -460,11 +464,65 @@ con su mensaje. Ahora usan severidad 16 y `SET NOEXEC ON`, que es el patrón que
       producción, devolver `appsettings.json` a `Database=WebhookGateway`, configurar el app pool y
       publicar. Y después, `db/15`.
 
+### 7.5 Revisión del 2026-10-05 — lo que faltaba para los 400.000 · **escrita; SQL medido en LocalDB**
+
+Una revisión del código —no del plan— encontró que el despachador nuevo seguía teniendo el problema
+que la fase 2 vino a quitar, en el caso para el que existe el gateway: un destino caído con mucho
+pendiente. La verificación de la fase 2 se hizo con 40 filas y no podía verlo. Cinco paquetes:
+
+- [x] **A. Claim y descubrimiento que no cuestan según el backlog.** El `ORDER BY NextAttemptAt, Id`
+      obligaba a leer y ordenar todo lo vencido del destino (el índice está partido por mes) y,
+      con `UPDLOCK`, a bloquearlo. El descubrimiento era un `SELECT DISTINCT` sobre todo lo
+      pendiente. Medido en LocalDB con 300.000 pendientes, antes → ahora:
+
+      | Consulta | Antes | Ahora |
+      |---|---|---|
+      | Claim de 20 | 6.228 bloqueos de fila, **escala a bloqueo de tabla**, 1.600 páginas, 235 ms | ~300 bloqueos, 0 escalados, ~566 páginas (casi todas, mantener los índices de las 20 filas), 4 ms |
+      | Descubrimiento | 1.026–2.056 páginas | **12 páginas**, 5 ms |
+
+      El claim va sin `ORDER BY` y los dos nombran `IX_Delivery_DispatchByEndpoint`: sin nombrarlo,
+      el optimizador elegía `IX_Delivery_Backlog` para el claim y recorría la tabla agrupada para el
+      descubrimiento (el `TOP (1)` le hace suponer que la primera fila valdrá). Pruebas nuevas en
+      `LargeBacklogTests`.
+- [x] **B. Lotes que caben en su lease.** `ClaimSizing` reclama solo lo que se alcanza a enviar en el
+      75 % del lease, en el peor caso (todo agota el timeout, el cubo de ritmo vacío): con los
+      valores por defecto 16, con una petición a la vez 4, a 6/min 13. Y el volcado de resultados
+      ya no pisa una entrega que otro worker tiene o que ya se cerró (`Status IN (1, 2)` y
+      `WorkerId` propio o nulo); si pasa, lo registra. Probado en LocalDB: de 4 resultados guarda
+      los 2 que debe.
+- [x] **C. Retraso por destino.** `dbo.fn_Gateway_DeliveryLag` (en `db/13`): cuánto lleva esperando
+      la entrega vencida más antigua de cada destino. Se pide partición por partición: un `MIN`
+      directo leía 1.233 páginas; así, 80. El vigilante avisa por encima de `@MaxLagMinutes` (15) y
+      el monitor del panel muestra pendientes y retraso por destino, en rojo sobre
+      `Gateway:Monitoring:MaxLagMinutes`.
+- [x] **D. Retención editable desde el panel.** Tabla `dbo.RetentionPolicy` (`db/17`), pantalla
+      Configuración (solo administradores, auditada) y la purga la lee en cada ejecución. Reglas:
+      los cuerpos duran al menos la ventana de entrega más larga, y al revés, un destino no puede
+      tener una ventana mayor que la retención de los cuerpos. **De paso:** el formulario de
+      integración pedía «retención por integración» y la guardaba, pero la purga nunca la usó (es
+      por particiones, global). Se quitó del panel; las columnas siguen en la base sin uso.
+- [x] **E. Código de rechazo por endpoint de entrada** (`db/16`). Con respaldo global
+      (`Gateway:Reception:TransientFailureStatusCode`) y usando la última configuración conocida
+      cuando SQL no responde. Probado de punta a punta contra LocalDB dejando la base fuera de
+      línea: el endpoint de GHL responde 429 y el del global 503. **Encontró un fallo que ya
+      existía:** un endpoint que no estaba en memoria respondía 500, porque la estrategia de
+      reintentos de EF Core envuelve el `SqlException` en un `RetryLimitExceededException` que la
+      recepción no reconocía. Arreglado; falta repetir esa prueba, que Smart App Control bloqueó.
+
+También: `setup-dev-db.sql` llevaba una copia vieja de `db/04` (con los borrados por lotes que la
+fase 3 movió al 12); ahora está al día, y aplicado entero a una base LocalDB funciona.
+
+**Lo que falta de esto:** ejecutar las suites (unitaria e integración) cuando Smart App Control suelte
+los DLL —el SQL de A–E ya se midió aparte, contra LocalDB— y repetir la prueba de la base fuera de
+línea con el arreglo del 500.
+
 ### Fase 6 — Prueba de carga y salida (2–3 días)
 
 **Prueba:** 70 mensajes/s sostenidos durante 30 minutos (~126.000 mensajes), 1 destino por
-mensaje, en SQL local de Docker, con destinos falsos: uno responde en 2 s, otro limitado a
-60/min y otro caído durante 5 minutos.
+mensaje, contra LocalDB, con destinos falsos: uno responde en 2 s, otro limitado a 60/min y otro
+caído durante 5 minutos. Dos escenarios más, añadidos en la revisión de §7.5: un destino que se
+recupera con 300.000 pendientes, y un destino lento al que le llega más de lo que su ritmo da
+(el retraso tiene que verse crecer en el panel y el vigilante tiene que avisar).
 
 | Criterio | Umbral |
 |---|---|
@@ -483,7 +541,7 @@ mensaje, en SQL local de Docker, con destinos falsos: uno responde en 2 s, otro 
 
 ## 8. Preguntas abiertas
 
-- ¿Qué destinos recibirán los 400k/día y qué límite de ritmo aceptan?
-- ¿Retención de 90 días o un año (~14 GB frente a ~42 GB)?
+- ~~¿Qué destinos recibirán los 400k/día?~~ Una integración nueva de GHL con un destino lento; ver §3.
+- ~~¿Retención de 90 días o un año?~~ Editable desde el panel; por defecto 180/30/30.
 - ¿Qué pérdida de datos es aceptable ante una caída (`SIMPLE` o `FULL`)?
 - ¿El repositorio donde está `appsettings.json` es privado? ¿Se subió alguna vez a uno público?

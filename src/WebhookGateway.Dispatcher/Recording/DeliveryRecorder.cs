@@ -2,46 +2,21 @@ using System.Data;
 using System.Globalization;
 using System.Text;
 using Dapper;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using WebhookGateway.Data.Db;
 
 namespace WebhookGateway.Dispatcher.Recording;
 
-/// <summary>Una fila de <c>DeliveryAttempt</c> pendiente de escribir.</summary>
-public sealed record AttemptRecord(
-    long DeliveryId,
-    DateTime StartedAt,
-    short AttemptNumber,
-    int DurationMs,
-    short? StatusCode,
-    string? ResponseHeadersJson,
-    string? ResponseBody,
-    string? ErrorMessage,
-    string WorkerId);
-
-/// <summary>El nuevo estado de una entrega tras un intento.</summary>
-public sealed record DeliveryUpdate(
-    long Id,
-    DateTime CreatedAt,
-    byte Status,
-    short AttemptCount,
-    DateTime NextAttemptAt,
-    short? LastStatusCode,
-    string? LastError,
-    DateTime? CompletedAt);
-
 /// <summary>
 /// Acumula resultados y los escribe en bloque.
 /// </summary>
-public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
+public sealed class DeliveryRecorder(
+    ISqlConnectionFactory connectionFactory,
+    IOptions<DispatcherOptions> options,
+    ILogger<DeliveryRecorder> logger)
 {
-    /*
-        Estos tres topes son las anchuras de las columnas, no números elegidos: WebhookDelivery.LastError
-        y DeliveryAttempt.ErrorMessage son nvarchar(1000), y las dos de respuesta nvarchar(4000). Recortar
-        de más pierde información; recortar de menos revienta el insert del lote entero.
-    */
-    private const int MaxErrorLength = 1000;
-    private const int MaxResponseLength = 4000;
-
+    private readonly string _workerId = options.Value.WorkerId;
     private readonly Lock _gate = new();
     private readonly List<AttemptRecord> _attempts = [];
     private readonly List<DeliveryUpdate> _updates = [];
@@ -52,10 +27,10 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
         {
             if (attempt is not null)
             {
-                _attempts.Add(TruncateAttempt(attempt));
+                _attempts.Add(ColumnLimits.Fit(attempt));
             }
 
-            _updates.Add(TruncateUpdate(update));
+            _updates.Add(ColumnLimits.Fit(update));
         }
     }
 
@@ -97,7 +72,15 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
 
         if (updates.Length > 0)
         {
-            await UpdateDeliveriesBatchAsync(connection, transaction, updates, cancellationToken);
+            var applied = await UpdateDeliveriesBatchAsync(connection, transaction, updates, cancellationToken);
+
+            if (applied < updates.Length)
+            {
+                logger.LogWarning(
+                    "{Skipped} de {Total} resultados no se guardaron: su lease venció y otro worker ya tenía " +
+                    "la entrega o ya la había cerrado. El destino pudo recibirlas dos veces.",
+                    updates.Length - applied, updates.Length);
+            }
         }
 
         if (attempts.Length > 0)
@@ -110,13 +93,26 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
         return updates.Length;
     }
 
-    private static async Task UpdateDeliveriesBatchAsync(
+    /*
+        La guarda del WHERE es lo que impide que un worker con el lease vencido pise a otro. Si el lease
+        venció a mitad de lote, el mantenimiento devolvió la entrega a la cola, y para cuando este
+        worker vuelca su resultado puede que otro la haya reclamado o incluso cerrado.
+
+        - Status IN (1, 2): nunca se reabre ni se reescribe una entrega terminada.
+        - WorkerId propio o nulo: si otro worker la tiene ahora, el resultado es suyo. Si está
+          nula, la entrega volvió a la cola y nadie la ha tocado aún: el resultado de este worker es
+          lo más reciente que se sabe de ella, y guardarlo evita enviarla otra vez.
+    */
+    private async Task<int> UpdateDeliveriesBatchAsync(
         IDbConnection connection, IDbTransaction transaction, DeliveryUpdate[] updates, CancellationToken ct)
     {
+        var applied = 0;
+
         foreach (var chunk in updates.Chunk(50))
         {
             var sb = new StringBuilder();
             var parameters = new DynamicParameters();
+            parameters.Add("wk", _workerId);
 
             for (int i = 0; i < chunk.Length; i++)
             {
@@ -126,7 +122,8 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
                     SET Status = @st{i}, AttemptCount = @at{i}, NextAttemptAt = @nx{i},
                         LastStatusCode = @sc{i}, LastError = @er{i}, CompletedAt = @cm{i},
                         LeaseUntil = NULL, WorkerId = NULL
-                    WHERE CreatedAt = @cr{i} AND Id = @id{i};
+                    WHERE CreatedAt = @cr{i} AND Id = @id{i}
+                      AND Status IN (1, 2) AND (WorkerId = @wk OR WorkerId IS NULL);
                     """);
 
                 parameters.Add($"st{i}", item.Status);
@@ -139,8 +136,11 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
                 parameters.Add($"id{i}", item.Id);
             }
 
-            await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, transaction, cancellationToken: ct));
+            applied += await connection.ExecuteAsync(
+                new CommandDefinition(sb.ToString(), parameters, transaction, cancellationToken: ct));
         }
+
+        return applied;
     }
 
     private static async Task InsertAttemptsBatchAsync(
@@ -175,24 +175,5 @@ public sealed class DeliveryRecorder(ISqlConnectionFactory connectionFactory)
             sb.Append(';');
             await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, transaction, cancellationToken: ct));
         }
-    }
-
-    private static DeliveryUpdate TruncateUpdate(DeliveryUpdate update) =>
-        update.LastError is { Length: > MaxErrorLength } error
-            ? update with { LastError = error[..MaxErrorLength] }
-            : update;
-
-    private static AttemptRecord TruncateAttempt(AttemptRecord attempt)
-    {
-        var headers = attempt.ResponseHeadersJson is { Length: > MaxResponseLength } h ? h[..MaxResponseLength] : attempt.ResponseHeadersJson;
-        var body = attempt.ResponseBody is { Length: > MaxResponseLength } b ? b[..MaxResponseLength] : attempt.ResponseBody;
-        var error = attempt.ErrorMessage is { Length: > MaxErrorLength } e ? e[..MaxErrorLength] : attempt.ErrorMessage;
-
-        return attempt with
-        {
-            ResponseHeadersJson = headers,
-            ResponseBody = body,
-            ErrorMessage = error
-        };
     }
 }

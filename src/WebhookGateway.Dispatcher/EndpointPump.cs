@@ -52,18 +52,22 @@ public sealed class EndpointPump(
                 return;
             }
 
+            // El destino va antes que el claim: de su ritmo y su timeout sale cuántas reclamar.
+            var target = await targets.GetAsync(endpointId, cancellationToken);
+            var batchSize = target is null
+                ? _options.MaxPerEndpointPerClaim
+                : ClaimSizing.For(target, _options.MaxPerEndpointPerClaim, _options.LeaseSeconds);
+
             var now = clock.GetUtcNow().UtcDateTime;
             var leaseUntil = now.AddSeconds(_options.LeaseSeconds);
 
             var claimed = await claimer.ClaimForEndpointAsync(
-                endpointId, now, leaseUntil, _options.WorkerId, _options.MaxPerEndpointPerClaim, cancellationToken);
+                endpointId, now, leaseUntil, _options.WorkerId, batchSize, cancellationToken);
 
             if (claimed.Count == 0)
             {
                 return;
             }
-
-            var target = await targets.GetAsync(endpointId, cancellationToken);
 
             if (target is null)
             {

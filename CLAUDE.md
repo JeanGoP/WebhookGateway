@@ -171,22 +171,27 @@ Estas no se negocian:
 
 1. El claim es atómico con lease y `READPAST`. Durante un despliegue hay **dos
    instancias vivas**; sin claim atómico eso son entregas duplicadas.
-2. El claim reparte por destino (`ROW_NUMBER() PARTITION BY OutboundEndpointId`). Un
-   backlog de un destino no puede dejar sin servicio a los demás.
-3. Toda entrega tiene `ExpiresAt`. Al vencer pasa a `Expired` y deja de reintentarse.
-4. `4xx` no se reintenta, salvo `408` y `429`. `5xx`, timeout y errores de red sí.
-5. El backoff lleva jitter aleatorio. Sin él, un pico de fallos genera un pico de
+2. Cada destino reclama lo suyo, en su propia bomba (`EndpointPump`). Un backlog de un destino
+   no puede dejar sin servicio a los demás.
+3. **Ninguna consulta del camino caliente cuesta en proporción al backlog.** Con un destino caído
+   hay cientos de miles de pendientes, y es justo cuando más se reclama. Por eso el claim no lleva
+   `ORDER BY` (en un índice partido por mes obliga a leer y bloquear todo lo pendiente) y nombra
+   su índice (el optimizador elegía otro). `LargeBacklogTests` lo comprueba con 300.000 filas;
+   cualquier consulta nueva sobre `WebhookDelivery` se mide igual antes de darla por buena.
+4. Toda entrega tiene `ExpiresAt`. Al vencer pasa a `Expired` y deja de reintentarse.
+5. `4xx` no se reintenta, salvo `408` y `429`. `5xx`, timeout y errores de red sí.
+6. El backoff lleva jitter aleatorio. Sin él, un pico de fallos genera un pico de
    reintentos sincronizados.
-6. Los `DeliveryAttempt` se escriben en batch, nunca uno por uno.
-7. El apagado es ordenado: dejar de reclamar, terminar lo que está en vuelo, volcar el
+7. Los `DeliveryAttempt` se escriben en batch, nunca uno por uno.
+8. El apagado es ordenado: dejar de reclamar, terminar lo que está en vuelo, volcar el
    batch, liberar leases.
-8. Reprogramar **no** consume intento. Si el circuito está abierto o el limitador de ritmo
+9. Reprogramar **no** consume intento. Si el circuito está abierto o el limitador de ritmo
    no da turno, no hemos enviado nada: subir `AttemptCount` ahí gastaría la ventana de
    entrega en intentos que nunca ocurrieron.
-9. El cortacircuitos solo cuenta fallos **transitorios**. Un `400` significa que el destino
+10. El cortacircuitos solo cuenta fallos **transitorios**. Un `400` significa que el destino
    está vivo y que el problema es ese mensaje; abrir el circuito por eso pararía las
    entregas buenas de todos los demás.
-10. No se siguen redirecciones. Un destino mal configurado no se arregla siguiéndolas, y
+11. No se siguen redirecciones. Un destino mal configurado no se arregla siguiéndolas, y
     hacerlo puede acabar mandando las credenciales a otro host.
 
 ---
@@ -209,8 +214,11 @@ tamaño sugiere.
 
 - **Unitarios** para lo que tiene lógica: escalera de backoff, clasificación de
   respuestas, máquina de estados del breaker, token bucket, validadores de firma.
-- **Integración con Testcontainers** para lo que toca SQL: el claim bajo concurrencia,
-  la recuperación de leases huérfanos, la deduplicación, el `SWITCH PARTITION`.
+- **Integración contra SQL Server real** para lo que toca SQL: el claim bajo concurrencia,
+  la recuperación de leases huérfanos, la deduplicación, el coste con backlog grande. Corren
+  donde haya motor: la cadena de `WEBHOOKGATEWAY_TEST_SQL`, un contenedor si hay Docker, o
+  **LocalDB** si está instalado (viene con Visual Studio). Solo aceptan servidores locales:
+  la fixture borra y recrea su base, así que nunca contra el servidor compartido.
 - No se testean getters, mapeos triviales ni configuración de EF.
 - Un test de concurrencia del claim con N workers simultáneos es obligatorio. Es el
   punto donde un bug se convierte en entregas duplicadas en producción.

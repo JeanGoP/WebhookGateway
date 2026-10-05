@@ -49,14 +49,32 @@ BEGIN
 END
 GO
 
+/*
+    Los días salen de dbo.RetentionPolicy (17-retention-policy.sql), que se edita desde el panel. Los
+    parámetros siguen existiendo para una ejecución a mano: si se pasan, mandan sobre la tabla. Sin
+    tabla ni parámetros —el script 17 sin aplicar— se usan 180/30/30.
+*/
 CREATE OR ALTER PROCEDURE dbo.sp_Gateway_PurgeExpiredPartitions
-    @MetadataRetentionDays int = 365,
-    @PayloadRetentionDays  int = 30,
-    @AttemptRetentionDays  int = 90,
+    @MetadataRetentionDays int = NULL,
+    @PayloadRetentionDays  int = NULL,
+    @AttemptRetentionDays  int = NULL,
     @DryRun                bit = 1   -- por defecto no borra: primero se mira qué haría
 AS
 BEGIN
     SET NOCOUNT ON;
+
+    IF OBJECT_ID(N'dbo.RetentionPolicy') IS NOT NULL
+    BEGIN
+        SELECT @MetadataRetentionDays = ISNULL(@MetadataRetentionDays, MetadataDays),
+               @PayloadRetentionDays  = ISNULL(@PayloadRetentionDays, PayloadDays),
+               @AttemptRetentionDays  = ISNULL(@AttemptRetentionDays, AttemptDays)
+        FROM dbo.RetentionPolicy
+        WHERE Id = 1;
+    END
+
+    SET @MetadataRetentionDays = ISNULL(@MetadataRetentionDays, 180);
+    SET @PayloadRetentionDays  = ISNULL(@PayloadRetentionDays, 30);
+    SET @AttemptRetentionDays  = ISNULL(@AttemptRetentionDays, 30);
 
     DECLARE @plan TABLE (
         TableName  sysname,

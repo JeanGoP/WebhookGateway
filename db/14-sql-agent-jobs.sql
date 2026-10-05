@@ -97,8 +97,9 @@ ELSE PRINT 'Ya existía: ' + @nombre;
    Entra en seco. TRUNCATE toma un bloqueo exclusivo breve y la purga por lotes mete pausas, pero
    de madrugada es cuando menos molesta.
 
-   Retención: mensajes y entregas 90 días, cuerpos 14, intentos 30. La purga de particiones solo
-   borra meses completos, así que "14 días" en la práctica son entre 14 y 45.
+   Retención: la de dbo.RetentionPolicy, editable desde el panel (por defecto mensajes y entregas
+   180 días, cuerpos 30, intentos 30). La purga de particiones solo borra meses completos, así que
+   "30 días" en la práctica son entre 30 y 61.
    ==================================================================== */
 
 SET @nombre = @db + N' - Purga';
@@ -112,11 +113,9 @@ BEGIN
         @enabled = 1,
         @job_id = @jobId OUTPUT;
 
+    -- Sin días: los toma de dbo.RetentionPolicy, que se edita desde el panel.
     SET @paso = N'EXEC dbo.sp_Gateway_PurgeExpiredPartitions
-    @MetadataRetentionDays = 90,
-    @PayloadRetentionDays  = 14,
-    @AttemptRetentionDays  = 30,
-    @DryRun                = 1;';
+    @DryRun = 1;';
 
     EXEC msdb.dbo.sp_add_jobstep
         @job_id = @jobId,
