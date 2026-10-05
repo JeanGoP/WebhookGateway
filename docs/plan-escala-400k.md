@@ -120,7 +120,7 @@ La muestra es pequeña; si los cuerpos crecen, el tamaño crece en proporción.
 - [x] SQL Server Agent confirmado en ejecución.
 - [x] Particiones: última frontera de `PF_Monthly` = **2027-07-01** (~9 meses de margen).
 - [x] Mediciones de producción (§1).
-- [x] `WebhookGateway_dev` al día con el código de §7.5 y §7.6 (2026-10-05): aplicados 13, 16, 17 y 04,
+- [x] `WebhookGateway_dev` al día con el código de §7.5 y §7.6 (2026-10-05): aplicados 13, 16, 17, 04 y 18,
       comprobados ejecutando la función de retraso, el vigilante y la purga en seco. El motor es
       SQL Server 2025 Enterprise (nivel de compatibilidad 160), y desde este equipo hay ~23 ms por
       viaje a SQL. Tiene dos destinos reales activos (AppHaku por un túnel de Cloudflare y el CRM en
