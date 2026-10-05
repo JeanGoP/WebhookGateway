@@ -171,8 +171,9 @@ Estas no se negocian:
 
 1. El claim es atómico con lease y `READPAST`. Durante un despliegue hay **dos
    instancias vivas**; sin claim atómico eso son entregas duplicadas.
-2. Cada destino reclama lo suyo, en su propia bomba (`EndpointPump`). Un backlog de un destino
-   no puede dejar sin servicio a los demás.
+2. Cada destino reclama lo suyo, en su propia bomba (`EndpointPump`), y mantiene llena su
+   concurrencia: sin lotes que esperen a la entrega más lenta. Un backlog de un destino no puede
+   dejar sin servicio a los demás.
 3. **Ninguna consulta del camino caliente cuesta en proporción al backlog.** Con un destino caído
    hay cientos de miles de pendientes, y es justo cuando más se reclama. Por eso el claim no lleva
    `ORDER BY` (en un índice partido por mes obliga a leer y bloquear todo lo pendiente) y nombra
@@ -183,15 +184,18 @@ Estas no se negocian:
 6. El backoff lleva jitter aleatorio. Sin él, un pico de fallos genera un pico de
    reintentos sincronizados.
 7. Los `DeliveryAttempt` se escriben en batch, nunca uno por uno.
-8. El apagado es ordenado: dejar de reclamar, terminar lo que está en vuelo, volcar el
+8. **El resultado de un intento se apunta antes que nada más, y nada puede impedirlo.** La petición
+   ya salió: si el resultado no se apunta, la entrega se reenvía al vencer el lease y el destino la
+   recibe dos veces. La salud del destino y los avisos van después y sus fallos solo se registran.
+9. El apagado es ordenado: dejar de reclamar, terminar lo que está en vuelo, volcar el
    batch, liberar leases.
-9. Reprogramar **no** consume intento. Si el circuito está abierto o el limitador de ritmo
+10. Reprogramar **no** consume intento. Si el circuito está abierto o el limitador de ritmo
    no da turno, no hemos enviado nada: subir `AttemptCount` ahí gastaría la ventana de
    entrega en intentos que nunca ocurrieron.
-10. El cortacircuitos solo cuenta fallos **transitorios**. Un `400` significa que el destino
+11. El cortacircuitos solo cuenta fallos **transitorios**. Un `400` significa que el destino
    está vivo y que el problema es ese mensaje; abrir el circuito por eso pararía las
    entregas buenas de todos los demás.
-11. No se siguen redirecciones. Un destino mal configurado no se arregla siguiéndolas, y
+12. No se siguen redirecciones. Un destino mal configurado no se arregla siguiéndolas, y
     hacerlo puede acabar mandando las credenciales a otro host.
 
 ---

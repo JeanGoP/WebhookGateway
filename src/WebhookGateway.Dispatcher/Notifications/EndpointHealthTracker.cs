@@ -15,6 +15,20 @@ namespace WebhookGateway.Dispatcher.Notifications;
 /// Healthy (0) -> Degraded (1) -> Down (2) -> Recovered (3).
 /// Suprime spam disparando alertas exclusivamente durante las transiciones.
 /// </summary>
+/// <remarks>
+/// Un destino tiene decenas de entregas en vuelo a la vez, y cuando cae o vuelve todas lo notan
+/// casi al mismo tiempo. Antes cada una leía el estado, calculaba el siguiente y lo escribía sin
+/// coordinarse: varias detectaban la misma transición, cada una lanzaba su MERGE, y dos MERGE sin
+/// HOLDLOCK que ven "no existe" insertan los dos y uno revienta con la clave primaria. Esa
+/// excepción cortaba la entrega después del HTTP y antes de apuntar su resultado, que se reenviaba
+/// al vencer el lease: un duplicado. Se vio en la prueba de carga del 2026-10-05.
+/// <para>
+/// Ahora cada destino tiene su cerrojo: evaluar, escribir y avisar van en orden, de uno en uno, y
+/// la base recibe las transiciones en el mismo orden en que ocurrieron. Las transiciones son raras,
+/// así que esperar el MERGE dentro del cerrojo no cuesta nada que se note. HOLDLOCK queda para dos
+/// instancias vivas, que no comparten memoria.
+/// </para>
+/// </remarks>
 public sealed class EndpointHealthTracker(
     NotificationStore notifications,
     ISqlConnectionFactory connectionFactory,
@@ -22,10 +36,8 @@ public sealed class EndpointHealthTracker(
     IOptions<NotificationOptions> options,
     ILogger<EndpointHealthTracker> logger)
 {
-    private const int DegradedThreshold = 3;
-
     private const string UpsertHealthSql = """
-        MERGE dbo.EndpointHealthState AS target
+        MERGE dbo.EndpointHealthState WITH (HOLDLOCK) AS target
         USING (SELECT @EndpointId AS OutboundEndpointId) AS src
         ON target.OutboundEndpointId = src.OutboundEndpointId
         WHEN MATCHED THEN
@@ -43,7 +55,7 @@ public sealed class EndpointHealthTracker(
                     @Now, CASE WHEN @AlertSent = 1 THEN @Now ELSE NULL END, @LastErrorMessage, @LastStatusCode);
         """;
 
-    private readonly ConcurrentDictionary<int, EndpointHealthStateMemory> _states = new();
+    private readonly ConcurrentDictionary<int, HealthCell> _cells = new();
     private readonly NotificationOptions _options = options.Value;
 
     public async Task RecordAttemptAsync(
@@ -53,23 +65,28 @@ public sealed class EndpointHealthTracker(
         string? errorMessage,
         CancellationToken cancellationToken)
     {
-        var now = clock.GetUtcNow().UtcDateTime;
-        var downThreshold = target.BreakerFailureThreshold;
+        var cell = _cells.GetOrAdd(target.Id, _ => new HealthCell());
 
-        var existing = _states.GetOrAdd(target.Id, _ => new EndpointHealthStateMemory(EndpointHealthStatus.Healthy, 0, 0));
+        await cell.Gate.WaitAsync(cancellationToken);
 
-        var (newStatus, newFailures, newSuccesses, alertType) = EvaluateNextState(
-            existing.Status, existing.ConsecutiveFailures, existing.ConsecutiveSuccesses, verdict, downThreshold);
-
-        _states[target.Id] = new EndpointHealthStateMemory(newStatus, newFailures, newSuccesses);
-
-        var transitionOccurred = newStatus != existing.Status;
-
-        if (transitionOccurred)
+        try
         {
+            var now = clock.GetUtcNow().UtcDateTime;
+            var previous = cell.Status;
+
+            var (newStatus, newFailures, newSuccesses, alertType) = EndpointHealthRules.EvaluateNextState(
+                cell.Status, cell.ConsecutiveFailures, cell.ConsecutiveSuccesses, verdict, target.BreakerFailureThreshold);
+
+            (cell.Status, cell.ConsecutiveFailures, cell.ConsecutiveSuccesses) = (newStatus, newFailures, newSuccesses);
+
+            if (newStatus == previous)
+            {
+                return;
+            }
+
             logger.LogInformation(
                 "Transición de salud en Endpoint {EndpointId} ({EndpointName}): {OldStatus} -> {NewStatus}",
-                target.Id, target.EndpointName, existing.Status, newStatus);
+                target.Id, target.EndpointName, previous, newStatus);
 
             using var connection = await connectionFactory.OpenAsync(cancellationToken);
             await connection.ExecuteAsync(new CommandDefinition(
@@ -92,48 +109,10 @@ public sealed class EndpointHealthTracker(
                 await EnqueueHealthAlertAsync(target, alertType.Value, newFailures, statusCode, errorMessage, now, cancellationToken);
             }
         }
-    }
-
-    public static (EndpointHealthStatus Status, int Failures, int Successes, NotificationAlertType? Alert) EvaluateNextState(
-        EndpointHealthStatus currentStatus, int currentFailures, int currentSuccesses, AttemptVerdict verdict, int downThreshold)
-    {
-        if (verdict == AttemptVerdict.Retryable)
+        finally
         {
-            var failures = currentFailures + 1;
-
-            if (failures >= downThreshold)
-            {
-                var alert = currentStatus != EndpointHealthStatus.Down ? NotificationAlertType.EndpointDown : (NotificationAlertType?)null;
-                return (EndpointHealthStatus.Down, failures, 0, alert);
-            }
-
-            if (failures >= DegradedThreshold && currentStatus == EndpointHealthStatus.Healthy)
-            {
-                return (EndpointHealthStatus.Degraded, failures, 0, NotificationAlertType.EndpointDegraded);
-            }
-
-            return (currentStatus, failures, 0, null);
+            cell.Gate.Release();
         }
-
-        if (verdict == AttemptVerdict.Success)
-        {
-            var successes = currentSuccesses + 1;
-
-            if (currentStatus is EndpointHealthStatus.Down or EndpointHealthStatus.Degraded)
-            {
-                return (EndpointHealthStatus.Recovered, 0, successes, NotificationAlertType.EndpointRecovered);
-            }
-
-            if (currentStatus == EndpointHealthStatus.Recovered && successes >= 2)
-            {
-                return (EndpointHealthStatus.Healthy, 0, successes, null);
-            }
-
-            return (currentStatus, 0, successes, null);
-        }
-
-        // Permanent failure (ej: 400 Bad Request): no cambia la salud del host
-        return (currentStatus, currentFailures, currentSuccesses, null);
     }
 
     private async Task EnqueueHealthAlertAsync(
@@ -187,7 +166,16 @@ public sealed class EndpointHealthTracker(
         }
     }
 
-    private sealed record EndpointHealthStateMemory(
-        EndpointHealthStatus Status, int ConsecutiveFailures, int ConsecutiveSuccesses);
+    /// <summary>El estado en memoria de un destino y el cerrojo que lo protege.</summary>
+    private sealed class HealthCell
+    {
+        public SemaphoreSlim Gate { get; } = new(1, 1);
+
+        public EndpointHealthStatus Status { get; set; } = EndpointHealthStatus.Healthy;
+
+        public int ConsecutiveFailures { get; set; }
+
+        public int ConsecutiveSuccesses { get; set; }
+    }
 }
 

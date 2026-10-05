@@ -3,11 +3,11 @@
 Documento de continuidad. Quien retome este trabajo (persona o Claude) debe leer primero
 `CLAUDE.md`, después este archivo, y solo entonces tocar código.
 
-Última actualización: 2026-10-05. **Fases 1 a 5 escritas, más una revisión (§7.5) que encontró que
-el claim y el descubrimiento costaban en proporción al backlog —el claim escalaba a bloqueo de
-tabla con 300.000 pendientes— y lo arregló, junto con otros cuatro paquetes. Ya no hace falta
-Docker: las pruebas de integración y la de carga corren contra LocalDB en este equipo. Queda la
-fase 6 y el despliegue.**
+Última actualización: 2026-10-05. **Fases 1 a 5 escritas, la revisión de §7.5 hecha y la prueba de
+carga (fase 6) pasada en LocalDB: 300.000 webhooks a tope y 63.000 a 70/s sostenidos, sin una
+pérdida ni un duplicado. La prueba destapó dos fallos del despachador —una carrera que podía
+duplicar entregas y un techo de concurrencia por destino— que ya están arreglados (§7.6). Queda el
+despliegue y, si se quiere, una prueba acotada contra `_dev`.**
 
 > **Sin Docker, con LocalDB.** En este equipo no hay Docker, pero sí SQL Server LocalDB 17.0
 > (`MSSQLLocalDB`). Desde el 2026-10-05 la fixture de integración lo usa sola cuando no hay Docker,
@@ -516,9 +516,60 @@ fase 3 movió al 12); ahora está al día, y aplicado entero a una base LocalDB 
 los DLL —el SQL de A–E ya se midió aparte, contra LocalDB— y repetir la prueba de la base fuera de
 línea con el arreglo del 500.
 
-### Fase 6 — Prueba de carga y salida (2–3 días)
+### 7.6 Prueba de carga en LocalDB (2026-10-05) · **hecha**
 
-**Prueba:** 70 mensajes/s sostenidos durante 30 minutos (~126.000 mensajes), 1 destino por
+Todo en este equipo: API contra LocalDB, destino falso local y generador. Las herramientas están en
+`tools/carga/` con su README, para repetirla.
+
+**Prueba cruda: 300.000 webhooks lo más rápido posible** (48 clientes, destino a 100 ms, caído del
+minuto 6 al 8). Se paró a mitad del drenaje.
+
+- Recepción: **300.000 de 300.000 con 202**, media 570/s y picos de 890/s; p50 53 ms, p95 209 ms,
+  p99 614 ms. Saturó LocalDB: las esperas eran `PAGELATCH` (inserciones peleando por la última
+  página de cada tabla), esperables a ese ritmo y con 48 clientes a la vez.
+- 0 escalados de bloqueo y 19 esperas de fila con hasta 294.000 pendientes.
+- 182.405 entregadas = 182.405 recibidas por el destino, 0 duplicadas.
+- **Encontró dos fallos:**
+  1. *Carrera en la salud del destino.* Cuando el destino cambia de estado, las entregas en vuelo
+     lo notan a la vez: varias escribían la misma transición, el `MERGE` sin `HOLDLOCK` chocaba con
+     la clave primaria, y la excepción cortaba la entrega **después** del HTTP y **antes** de apuntar
+     su resultado. La entrega se reenviaba al vencer el lease: un duplicado. **Arreglado:** cada
+     destino tiene un cerrojo para su estado de salud, el `MERGE` lleva `HOLDLOCK` (dos instancias
+     vivas), y el resultado se apunta antes que la salud y los avisos, que ya no pueden tumbarlo.
+     `EndpointHealthConcurrencyTests` reproduce el fallo con el código anterior y pasa con el nuevo.
+  2. *Techo de concurrencia por destino.* Se reclamaban lotes de 20 y se esperaba a la más lenta
+     antes de pedir más: un destino no pasaba de 20 peticiones a la vez aunque tuviera 32, y rendía
+     80–160/s con 100 ms de latencia. **Arreglado:** `EndpointPump` mantiene llena la concurrencia
+     del destino y repone cuando se libera una cuarta parte.
+- Espacio: con cuerpos del tamaño de los de GHL (~1 KB) salieron **~1,7 KB por mensaje**, unas tres
+  veces los 590 B medidos en producción con cuerpos pequeños. Con 180/30/30 eso puede ser 40–60 GB,
+  no 20. Medir con los webhooks reales y ajustar en Configuración.
+
+**Prueba realista: 63.000 webhooks a 70/s fijos durante 15 minutos**, ya con los dos arreglos.
+Destino lento (1 s por petición) con 96 de concurrencia, caído del minuto 6 al 8.
+
+| Criterio | Umbral | Resultado |
+|---|---|---|
+| Caídas del proceso | 0 | 0 |
+| Errores en recepción | 0 | **0**: 63.000 de 63.000 con 202 |
+| Latencia de recepción p95 | < 200 ms | **4 ms** (p50 2,7 ms, p99 26 ms) |
+| Entregas perdidas o duplicadas | 0 | **0**: 63.001 entregadas = 63.001 únicas en el destino |
+| Retraso con el destino sano | < 10 s | 0–1 s |
+| Retraso tras 2 min de caída | < 15 min | Máximo 2 min; se pone al día a ~78/s frente a 70/s de entrada |
+| Concurrencia usada | — | Hasta **92 en curso** (antes, como mucho 20) |
+| Bloqueos SQL | Sin escalado | 0 escalados, 0 esperas de fila |
+| Salud del destino | Caída y recuperación | Sano → Caído → Recuperado → Sano, sin errores en el log |
+
+Lo que no se probó aquí: dos instancias vivas a la vez (el claim atómico lo cubre
+`DeliveryClaimTests`), varios destinos con uno lento frenando a otro, y el comportamiento en el
+servidor real.
+
+**Sin explicar:** en la prueba cruda el despacho bajó un rato a 6–30/s (15:35–15:41) sin
+crecimiento de archivos ni bloqueos que lo justifiquen. No se repitió en la realista.
+
+### Fase 6 — Prueba de carga y salida (2–3 días) · **hecha en LocalDB (§7.6)**
+
+**Prueba original:** 70 mensajes/s sostenidos durante 30 minutos (~126.000 mensajes), 1 destino por
 mensaje, contra LocalDB, con destinos falsos: uno responde en 2 s, otro limitado a 60/min y otro
 caído durante 5 minutos. Dos escenarios más, añadidos en la revisión de §7.5: un destino que se
 recupera con 300.000 pendientes, y un destino lento al que le llega más de lo que su ritmo da
@@ -535,7 +586,11 @@ recupera con 300.000 pendientes, y un destino lento al que le llega más de lo q
 | Alertas del destino caído | 1 de caída y 1 de recuperación |
 | Bloqueos SQL | Sin escalado a bloqueo de tabla en `WebhookDelivery` |
 
-- [ ] Actualizar las cifras de `CLAUDE.md` con los resultados finales.
+- [x] Resultados en §7.6. Las reglas que salieron de ellos están en `CLAUDE.md` (despachador, 2 y 8).
+- [ ] Opcional: prueba acotada contra `_dev` del servidor real, con las condiciones acordadas el
+      2026-10-05: horario de poco tráfico y aviso al administrador, carga escalonada y corta
+      (10/s, 30/s, pico de 70/s de 2–3 min), criterios para abortar, destinos solo locales, refresco
+      del panel a 5–10 s, y los scripts 13, 16, 17 y 04 aplicados antes.
 
 ---
 

@@ -78,22 +78,52 @@ public sealed class DeliveryDispatcher(
 
         var verdict = AttemptClassifier.Classify(result.StatusCode);
         breakers.Record(target.Id, verdict, target.BreakerFailureThreshold, target.BreakerOpenSeconds);
-        await healthTracker.RecordAttemptAsync(target, verdict, (short?)result.StatusCode, result.ErrorMessage, cancellationToken);
 
         var attempt = new AttemptRecord(
             delivery.Id, startedAt, attemptNumber, (int)stopwatch.ElapsedMilliseconds,
             (short?)result.StatusCode, result.ResponseHeadersJson, result.ResponseBody, result.ErrorMessage, _workerId);
 
+        // Lo primero, el resultado: la petición ya salió, y perderlo es reenviarla al vencer el lease.
         var update = Decide(delivery, target, result, verdict, attemptNumber);
         recorder.Add(attempt, update);
 
-        var descartada = update.Status == (byte)DeliveryStatus.Failed
-                      || update.Status == (byte)DeliveryStatus.Expired;
+        await NotifyAsync(delivery, target, result, verdict, update, attemptNumber, cancellationToken);
+    }
 
-        if (descartada && deadLetters.Enabled)
+    /// <summary>
+    /// Salud del destino y aviso de descarte: después del resultado, y sin poder tumbarlo. Antes un
+    /// fallo aquí cortaba la entrega sin apuntarla y el destino la recibía dos veces.
+    /// </summary>
+    private async Task NotifyAsync(
+        ClaimedDelivery delivery, OutboundTarget target, SendResult result, AttemptVerdict verdict,
+        DeliveryUpdate update, short attemptNumber, CancellationToken cancellationToken)
+    {
+        try
         {
-            await deadLetters.RaiseAsync(delivery, target, result, attemptNumber, cancellationToken);
+            await healthTracker.RecordAttemptAsync(target, verdict, (short?)result.StatusCode, result.ErrorMessage, cancellationToken);
+
+            var descartada = update.Status == (byte)DeliveryStatus.Failed
+                          || update.Status == (byte)DeliveryStatus.Expired;
+
+            if (descartada && deadLetters.Enabled)
+            {
+                await deadLetters.RaiseAsync(delivery, target, result, attemptNumber, cancellationToken);
+            }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+#pragma warning disable CA1031 // Deliberado: un aviso que falla no puede deshacer una entrega que ya se hizo.
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "No se pudo registrar la salud o el aviso del destino {EndpointId} para la entrega {DeliveryId}. " +
+                "La entrega quedó apuntada igual.",
+                target.Id, delivery.Id);
+        }
+#pragma warning restore CA1031
     }
 
     /// <summary>Traduce el veredicto del intento al nuevo estado de la entrega.</summary>

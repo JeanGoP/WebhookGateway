@@ -13,11 +13,11 @@ namespace WebhookGateway.Dispatcher;
 /// cola. Cada destino tiene el suyo y ninguno espera a los demás.
 /// </summary>
 /// <remarks>
-/// Esto es lo que sustituye al ciclo anterior, que reclamaba cien entregas de todos los destinos
-/// mezclados y esperaba a que acabara la más lenta. Con aquello, un destino limitado a 60/min y con
-/// backlog alargaba cada ciclo unos quince segundos, y uno con un timeout de 30 s lo alargaba
-/// treinta: el sistema entero caía a tres o siete entregas por segundo aunque los demás destinos
-/// estuvieran perfectamente.
+/// Sin lotes con barrera, ni entre destinos ni dentro de uno. Esperar a la entrega más lenta de un
+/// lote es lo que hundía al ciclo antiguo a 3–7/s, y dentro de un destino lo dejaba en 80–160/s con
+/// 100 ms de latencia y sin pasar de veinte huecos aunque tuviera treinta y dos (prueba de carga del
+/// 2026-10-05). Ahora la concurrencia del destino se mantiene llena: cuando se libera una cuarta
+/// parte, se vuelca lo terminado y se reclama lo que cabe. El techo es concurrencia ÷ latencia.
 /// </remarks>
 public sealed class EndpointPump(
     DeliveryClaimer claimer,
@@ -34,70 +34,123 @@ public sealed class EndpointPump(
 
     /// <summary>
     /// Vacía la cola de un destino. Vuelve cuando no queda nada que reclamar, cuando el circuito
-    /// del destino está abierto o cuando se pide el apagado.
+    /// del destino está abierto o cuando se pide el apagado; en todos los casos, con lo que estaba
+    /// en vuelo ya terminado.
     /// </summary>
     public async Task DrainAsync(int endpointId, SemaphoreSlim capacity, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(capacity);
 
-        while (!cancellationToken.IsCancellationRequested)
+        var inFlight = new List<Task>();
+
+        try
         {
-            /*
-                Circuito abierto: no se reclama ni una fila. Antes esto se comprobaba por entrega, ya
-                reclamada, así que un destino caído con mil pendientes eran mil reclamaciones y mil
-                reprogramaciones en SQL para no enviar nada.
-            */
-            if (breakers.OpenUntil(endpointId) is not null)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                return;
-            }
-
-            // El destino va antes que el claim: de su ritmo y su timeout sale cuántas reclamar.
-            var target = await targets.GetAsync(endpointId, cancellationToken);
-            var batchSize = target is null
-                ? _options.MaxPerEndpointPerClaim
-                : ClaimSizing.For(target, _options.MaxPerEndpointPerClaim, _options.LeaseSeconds);
-
-            var now = clock.GetUtcNow().UtcDateTime;
-            var leaseUntil = now.AddSeconds(_options.LeaseSeconds);
-
-            var claimed = await claimer.ClaimForEndpointAsync(
-                endpointId, now, leaseUntil, _options.WorkerId, batchSize, cancellationToken);
-
-            if (claimed.Count == 0)
-            {
-                return;
-            }
-
-            if (target is null)
-            {
-                // El destino ya no existe o lo desactivaron. No hay a dónde mandar esto.
-                foreach (var delivery in claimed)
+                /*
+                    Circuito abierto: no se reclama ni una fila. Antes esto se comprobaba por entrega,
+                    ya reclamada, así que un destino caído con mil pendientes eran mil reclamaciones y
+                    mil reprogramaciones en SQL para no enviar nada.
+                */
+                if (breakers.OpenUntil(endpointId) is not null)
                 {
-                    dispatcher.TerminateMissingTarget(delivery);
+                    await FinishAsync(inFlight, cancellationToken);
+                    return;
                 }
 
+                // El destino va antes que el claim: de su ritmo y su timeout sale cuántas reclamar.
+                var target = await targets.GetAsync(endpointId, cancellationToken);
+
+                if (target is null)
+                {
+                    await FinishAsync(inFlight, cancellationToken);
+                    await TerminateMissingTargetAsync(endpointId, cancellationToken);
+                    return;
+                }
+
+                var slots = Math.Max(1, target.MaxConcurrency);
+                await WaitForRoomAsync(inFlight, slots);
+
+                // Lo terminado se vuelca antes de pedir más: un resultado no espera más de un ciclo.
                 await recorder.FlushAsync(cancellationToken);
-                return;
+
+                var batchSize = Math.Min(
+                    slots - inFlight.Count,
+                    ClaimSizing.For(target, _options.MaxPerEndpointPerClaim, _options.LeaseSeconds));
+
+                var claimed = await ClaimAsync(endpointId, batchSize, cancellationToken);
+
+                if (claimed.Count == 0)
+                {
+                    if (inFlight.Count == 0)
+                    {
+                        return;
+                    }
+
+                    // Nada vencido ahora mismo. Se termina lo que está en vuelo y se vuelve a mirar:
+                    // mientras tanto puede haber llegado más, o vencido un reintento.
+                    await FinishAsync(inFlight, cancellationToken);
+                    continue;
+                }
+
+                var payloads = await dispatcher.PreloadPayloadsAsync(claimed.Select(d => d.MessageId), cancellationToken);
+
+                foreach (var delivery in claimed)
+                {
+                    inFlight.Add(SendOneAsync(delivery, target, payloads, capacity, cancellationToken).AsTask());
+                }
             }
-
-            var payloads = await dispatcher.PreloadPayloadsAsync(claimed.Select(d => d.MessageId), cancellationToken);
-
-            /*
-                La concurrencia la pone el destino, no los núcleos de la máquina: entregar es esperar
-                a la red. El techo global de capacidad va aparte, dentro de SendOneAsync.
-            */
-            var parallel = new ParallelOptions
-            {
-                MaxDegreeOfParallelism = Math.Max(1, target.MaxConcurrency),
-                CancellationToken = cancellationToken,
-            };
-
-            await Parallel.ForEachAsync(claimed, parallel, (delivery, token) =>
-                SendOneAsync(delivery, target, payloads, capacity, token));
-
-            await recorder.FlushAsync(cancellationToken);
         }
+        finally
+        {
+            // Ni un fallo ni el apagado dejan envíos huérfanos. Sus resultados quedan en el recorder
+            // y los vuelca el siguiente ciclo, o el apagado ordenado del supervisor.
+            await Task.WhenAll(inFlight);
+        }
+    }
+
+    /// <summary>
+    /// Espera a que se libere al menos una cuarta parte de la concurrencia del destino. Reclamar por
+    /// cada hueco suelto serían tres viajes a SQL por entrega.
+    /// </summary>
+    private static async Task WaitForRoomAsync(List<Task> inFlight, int slots)
+    {
+        inFlight.RemoveAll(t => t.IsCompleted);
+        var refill = Math.Max(1, slots / 4);
+
+        while (inFlight.Count > 0 && slots - inFlight.Count < refill)
+        {
+            await Task.WhenAny(inFlight);
+            inFlight.RemoveAll(t => t.IsCompleted);
+        }
+    }
+
+    private async Task FinishAsync(List<Task> inFlight, CancellationToken cancellationToken)
+    {
+        await Task.WhenAll(inFlight);
+        inFlight.Clear();
+        await recorder.FlushAsync(cancellationToken);
+    }
+
+    private Task<IReadOnlyList<ClaimedDelivery>> ClaimAsync(int endpointId, int batchSize, CancellationToken cancellationToken)
+    {
+        var now = clock.GetUtcNow().UtcDateTime;
+
+        return claimer.ClaimForEndpointAsync(
+            endpointId, now, now.AddSeconds(_options.LeaseSeconds), _options.WorkerId, batchSize, cancellationToken);
+    }
+
+    /// <summary>El destino ya no existe o lo desactivaron: no hay a dónde mandar lo que tenga.</summary>
+    private async Task TerminateMissingTargetAsync(int endpointId, CancellationToken cancellationToken)
+    {
+        var claimed = await ClaimAsync(endpointId, _options.MaxPerEndpointPerClaim, cancellationToken);
+
+        foreach (var delivery in claimed)
+        {
+            dispatcher.TerminateMissingTarget(delivery);
+        }
+
+        await recorder.FlushAsync(cancellationToken);
     }
 
     private async ValueTask SendOneAsync(
@@ -119,12 +172,8 @@ public sealed class EndpointPump(
                 return;
             }
 
-            /*
-                2. La capacidad global, y DESPUÉS del turno. El orden es lo importante: si se pidiera
-                   primero la capacidad, una entrega esperando el ritmo de su destino estaría ocupando
-                   un hueco que otro destino podría usar, y el problema que esto viene a arreglar
-                   volvería por la puerta de atrás.
-            */
+            // 2. La capacidad global, y DESPUÉS del turno: pedida antes, una entrega esperando el
+            //    ritmo de su destino ocuparía un hueco que otro destino podría estar usando.
             await capacity.WaitAsync(cancellationToken);
 
             try

@@ -61,6 +61,7 @@ public sealed class SqlServerFixture : IAsyncLifetime
 
         await RunScriptAsync("01-schema.sql");
         await RunScriptAsync("02-traffic-tables.sql");
+        await RunScriptAsync("08-endpoint-health.sql");
         await RunScriptAsync("10-traffic-write-inbound.sql");
         await RunScriptAsync("11-delivery-dispatch-by-endpoint.sql");
     }

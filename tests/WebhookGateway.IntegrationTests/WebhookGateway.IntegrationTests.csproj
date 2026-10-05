@@ -32,6 +32,7 @@
   <ItemGroup>
     <None Include="..\..\db\01-schema.sql" Link="db\01-schema.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\db\02-traffic-tables.sql" Link="db\02-traffic-tables.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\db\08-endpoint-health.sql" Link="db\08-endpoint-health.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\db\10-traffic-write-inbound.sql" Link="db\10-traffic-write-inbound.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\db\11-delivery-dispatch-by-endpoint.sql" Link="db\11-delivery-dispatch-by-endpoint.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
