@@ -78,7 +78,7 @@ de desarrollo. Para producción, dentro de lo que ya hay:
   },
   "Reception":  { "TransientFailureStatusCode": 429 },
   "Monitoring": { "MaxLagMinutes": 15 },
-  "Notifications": { "DashboardBaseUrl": "<URL real del panel>" }
+  "Notifications": { "DashboardBaseUrl": "http://localhost:5174" }
 }
 ```
 
@@ -86,7 +86,10 @@ de desarrollo. Para producción, dentro de lo que ya hay:
   de log; a 400.000 al día son millones de líneas y disco que se llena solo.
 - `MaxGlobalConcurrency` 256 y `MaxPerEndpointPerClaim` 40: con los de fábrica (128 y 20) un destino
   con `MaxConcurrency` alto no llega a llenarla. El informe de capacidad dice si se quedan cortos.
-- `DashboardBaseUrl` es el enlace que llevan los correos de alerta; hoy apunta a `localhost`.
+- **El panel no está publicado**: se ejecuta en local cuando hace falta, apuntando a la API de
+  producción (`VITE_API_URL` en `frontend/.env`). Por eso `DashboardBaseUrl` —el enlace de los
+  correos de alerta— se queda en `http://localhost:5174`, y CORS tiene que seguir admitiendo ese
+  origen: `AllowedOrigins` en `*` como hoy, o `http://localhost:5174`.
 - `MaxLagMinutes` tiene que coincidir con el `@MaxLagMinutes` del job de Vigilancia (15).
 
 ---
