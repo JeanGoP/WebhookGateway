@@ -40,9 +40,17 @@ END
 GO
 
 DECLARE @db sysname = DB_NAME();
+/*
+    @jobId se reutiliza para los cuatro jobs y TIENE que volver a NULL antes de cada sp_add_job: si llega
+    con el id del anterior, no se crea un job nuevo y los pasos y horarios siguientes se cuelgan del
+    primero. Así estaba, y salía un solo job con cinco pasos y cuatro horarios (visto en LocalDB el
+    2026-10-05, antes de ejecutarlo nunca en un servidor real).
+*/
 DECLARE @jobId uniqueidentifier;
 DECLARE @nombre sysname;
 DECLARE @paso nvarchar(max);
+-- Los parámetros de un EXEC no admiten expresiones: el nombre de cada horario se arma aquí antes.
+DECLARE @horario sysname;
 
 /* Categoría propia, para que no se mezclen con los jobs de otros sistemas de la instancia. */
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.syscategories WHERE name = N'WebhookGateway' AND category_class = 1)
@@ -61,6 +69,7 @@ SET @nombre = @db + N' - Particiones futuras';
 
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = @nombre)
 BEGIN
+    SET @jobId = NULL;  -- si llega con el id del job anterior, sp_add_job no crea uno nuevo
     EXEC msdb.dbo.sp_add_job
         @job_name = @nombre,
         @category_name = N'WebhookGateway',
@@ -77,9 +86,10 @@ BEGIN
         @retry_attempts = 2,
         @retry_interval = 5;
 
+    SET @horario = @nombre + N' - semanal';
     EXEC msdb.dbo.sp_add_jobschedule
         @job_id = @jobId,
-        @name = @nombre + N' - semanal',
+        @name = @horario,
         @freq_type = 8,                 -- semanal
         @freq_interval = 1,             -- domingo
         @freq_recurrence_factor = 1,
@@ -106,6 +116,7 @@ SET @nombre = @db + N' - Purga';
 
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = @nombre)
 BEGIN
+    SET @jobId = NULL;  -- si llega con el id del job anterior, sp_add_job no crea uno nuevo
     EXEC msdb.dbo.sp_add_job
         @job_name = @nombre,
         @category_name = N'WebhookGateway',
@@ -137,9 +148,10 @@ BEGIN
         @database_name = @db,
         @command = @paso;
 
+    SET @horario = @nombre + N' - diaria';
     EXEC msdb.dbo.sp_add_jobschedule
         @job_id = @jobId,
-        @name = @nombre + N' - diaria',
+        @name = @horario,
         @freq_type = 4,                 -- diaria
         @freq_interval = 1,
         @active_start_time = 30000;     -- 03:00:00
@@ -161,6 +173,7 @@ SET @nombre = @db + N' - Estadisticas';
 
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = @nombre)
 BEGIN
+    SET @jobId = NULL;  -- si llega con el id del job anterior, sp_add_job no crea uno nuevo
     EXEC msdb.dbo.sp_add_job
         @job_name = @nombre,
         @category_name = N'WebhookGateway',
@@ -180,9 +193,10 @@ UPDATE STATISTICS dbo.DeliveryAttempt;';
         @database_name = @db,
         @command = @paso;
 
+    SET @horario = @nombre + N' - diaria';
     EXEC msdb.dbo.sp_add_jobschedule
         @job_id = @jobId,
-        @name = @nombre + N' - diaria',
+        @name = @horario,
         @freq_type = 4,
         @freq_interval = 1,
         @active_start_time = 33000;     -- 03:30:00
@@ -205,10 +219,11 @@ SET @nombre = @db + N' - Vigilancia';
 
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = @nombre)
 BEGIN
+    SET @jobId = NULL;  -- si llega con el id del job anterior, sp_add_job no crea uno nuevo
     EXEC msdb.dbo.sp_add_job
         @job_name = @nombre,
         @category_name = N'WebhookGateway',
-        @description = N'Avisa si quedan menos de 3 meses de particiones, si el backlog se dispara o si hay leases huérfanos. Falla a propósito cuando encuentra algo.',
+        @description = N'Avisa si quedan menos de 3 meses de particiones, si el backlog se dispara, si alguna entrega lleva más de 15 minutos esperando o si hay leases huérfanos. Falla a propósito cuando encuentra algo.',
         @enabled = 1,
         @notify_level_eventlog = 2,     -- al fallar, al registro de eventos de Windows
         @job_id = @jobId OUTPUT;
@@ -218,11 +233,13 @@ BEGIN
         @step_name = N'Watchdog',
         @subsystem = N'TSQL',
         @database_name = @db,
-        @command = N'EXEC dbo.sp_Gateway_Watchdog @MinMonthsOfPartitions = 3, @MaxBacklog = 50000;';
+        -- @MaxLagMinutes tiene que coincidir con Gateway:Monitoring:MaxLagMinutes del panel.
+        @command = N'EXEC dbo.sp_Gateway_Watchdog @MinMonthsOfPartitions = 3, @MaxBacklog = 50000, @MaxLagMinutes = 15;';
 
+    SET @horario = @nombre + N' - cada 10 min';
     EXEC msdb.dbo.sp_add_jobschedule
         @job_id = @jobId,
-        @name = @nombre + N' - cada 10 min',
+        @name = @horario,
         @freq_type = 4,                 -- diaria…
         @freq_interval = 1,
         @freq_subday_type = 4,          -- …cada N minutos

@@ -8,7 +8,7 @@ que tiene que estar siempre despierto**. Casi todo lo que hay abajo existe por e
 
 ---
 
-## Antes de publicar: seis comprobaciones
+## Antes de publicar: siete comprobaciones
 
 **1. `appsettings.json` tiene que decir `Database=WebhookGateway`.**
 
@@ -20,28 +20,12 @@ Hoy apunta a `WebhookGateway_dev`. Si se publica así, **producción escribe en 
 desarrollo** y nadie se entera hasta que falta algo. Es la regla 4 de la §5 de
 `plan-escala-400k.md` y el error más fácil de cometer de todo el despliegue.
 
-**2. El esquema de producción tiene que estar al día.** Los scripts de `db/` son idempotentes y
-todos estos son compatibles con el código que está corriendo, así que se aplican **antes** de
-publicar y **en este orden**:
-
-| Script | Qué hace | Por qué antes de publicar |
-|---|---|---|
-| `11-delivery-dispatch-by-endpoint.sql` | Índice del claim por destino | El código nuevo lo nombra en sus consultas: sin él, el claim falla |
-| `13-watchdog.sql` | Función de retraso por destino y vigilante | El monitor del panel usa la función; necesita el índice del 11 |
-| `16-inbound-transient-status.sql` | Código de rechazo por endpoint de entrada | EF Core lee la columna: sin ella, la recepción falla |
-| `17-retention-policy.sql` | Tabla de retención (180/30/30) | La usan la pantalla de Configuración y el guardado de destinos |
-| `04-partition-maintenance.sql` | Purga que lee la retención de la tabla | Lo usa el job de purga |
-| `18-capacity-report.sql` | Informe de capacidad (`sp_Gateway_CapacityReport`) | Solo lee; no lo usa el código, es para diagnosticar |
-
-```powershell
-foreach ($f in '11-delivery-dispatch-by-endpoint', '13-watchdog', '16-inbound-transient-status',
-               '17-retention-policy', '04-partition-maintenance', '18-capacity-report') {
-    sqlcmd -S 200.7.96.218 -U egutierrez -d WebhookGateway -b -i ".\db\$f.sql"
-}
-```
-
-El índice del 11 es lo único pesado. Si el servidor es Enterprise, añádele `ONLINE = ON` para no
-bloquear las escrituras mientras se crea; si es Standard, hazlo en horario de poco tráfico.
+**2. El esquema de producción tiene que estar al día.** ✅ **Hecho el 2026-10-05** (19:28, hora del
+servidor) con `db/despliegues/2026-10-05-produccion.sql`, que aplica 10, 11, 12, 13, 16, 17, 04 y 18
+en ese orden y comprueba cada pieza. Verificado después: las nueve piezas, la retención 180/30/30 y
+el índice nuevo creado con `ONLINE = ON`. Todo es compatible con el código que corre hoy. Si
+hubiera que deshacerlo: `db/despliegues/2026-10-05-produccion-vuelta-atras.sql`, y **solo** con el
+código anterior publicado.
 
 `db/15-drop-legacy-dispatch-index.sql` va **después** de desplegar, no antes: mientras corra el
 código viejo, el índice que borra es el que sostiene su claim. El script lleva un guardia que
@@ -73,6 +57,37 @@ de `Gateway`:
 ```
 
 Sin él vale 503, que es lo estándar y lo que GHL da por perdido.
+
+**7. Capacidad, logs y enlaces en `appsettings.json`.** Lo que hoy trae el archivo son los valores
+de desarrollo. Para producción, dentro de lo que ya hay:
+
+```json
+"Logging": {
+  "LogLevel": {
+    "Default": "Warning",
+    "Microsoft.AspNetCore": "Warning",
+    "Microsoft.EntityFrameworkCore.Database.Command": "Warning",
+    "System.Net.Http.HttpClient": "Warning"
+  }
+},
+"Gateway": {
+  "Dispatcher": {
+    "MaxGlobalConcurrency": 256,
+    "MaxEndpointsInParallel": 32,
+    "MaxPerEndpointPerClaim": 40
+  },
+  "Reception":  { "TransientFailureStatusCode": 429 },
+  "Monitoring": { "MaxLagMinutes": 15 },
+  "Notifications": { "DashboardBaseUrl": "<URL real del panel>" }
+}
+```
+
+- `Default: Warning` y `HttpClient: Warning`: con `Information`, cada entrega escribe varias líneas
+  de log; a 400.000 al día son millones de líneas y disco que se llena solo.
+- `MaxGlobalConcurrency` 256 y `MaxPerEndpointPerClaim` 40: con los de fábrica (128 y 20) un destino
+  con `MaxConcurrency` alto no llega a llenarla. El informe de capacidad dice si se quedan cortos.
+- `DashboardBaseUrl` es el enlace que llevan los correos de alerta; hoy apunta a `localhost`.
+- `MaxLagMinutes` tiene que coincidir con el `@MaxLagMinutes` del job de Vigilancia (15).
 
 ---
 
@@ -258,7 +273,7 @@ que la separación evita queda cubierto. Merece la pena volver a mirarlo si pasa
   hasta `MaxEndpointsInParallel` (32) destinos avanzando, cada uno abriendo conexiones cortas para
   reclamar y volcar, además de las peticiones de la API. Si aparecen timeouts de "connection pool",
   ahí está el techo.
-- **Los jobs del Agente SQL** (`db/14-sql-agent-jobs.sql`), que todavía no están creados. El de
-  vigilancia es el que avisaría de casi todo lo demás. El de purga ya no fija la retención: la lee
+- **Los jobs del Agente SQL** (`db/14-sql-agent-jobs.sql`): ✅ creados en producción el 2026-10-05
+  (detalle en `jobs-sql-agent.md`). El de vigilancia es el que avisaría de casi todo lo demás. El de purga ya no fija la retención: la lee
   de la tabla que se edita en el panel (Configuración).
 - **La purga entra en seco.** Una semana mirando lo que *habría* borrado antes de dejarla borrar.
